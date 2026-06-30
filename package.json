@@ -1,12 +1,11 @@
 {
   "name": "claude-codex-usage-dashboard",
-  "version": "0.4.1",
-  "description": "A local Windows and macOS dashboard for Claude Code, Codex, and Antigravity usage limits.",
+  "version": "0.1.0",
+  "description": "A local Windows dashboard for Claude Code and Codex usage limits.",
   "main": "desktop/main.js",
   "scripts": {
     "start": "electron ./desktop/main.js",
     "start:desktop": "electron ./desktop/main.js",
-    "start:server": "node server.js",
     "autostart:desktop": "install-desktop-autostart.bat",
     "autostart:desktop:off": "uninstall-desktop-autostart.bat",
     "setup:claude": "node setup-statusline.js",
@@ -15,11 +14,8 @@
   "keywords": [
     "claude",
     "codex",
-    "antigravity",
     "usage-dashboard",
-    "desktop",
     "windows",
-    "macos",
     "statusline"
   ],
   "author": "",
