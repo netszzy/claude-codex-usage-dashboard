@@ -1,8 +1,8 @@
 # Claude / Codex Usage Dashboard
 
-An unofficial local dashboard for viewing Claude Code and Codex usage limits on a spare phone, tablet, or small screen.
+An unofficial local floating desktop dashboard for viewing Claude Code and Codex usage limits.
 
-The server runs on your Windows machine, reads local usage data, and serves a simple dashboard that can be opened from another device on the same Wi-Fi network.
+The desktop window runs on your Windows machine, reads local usage data, and uses a localhost-only internal service.
 
 ![Status](https://img.shields.io/badge/platform-Windows-767FC6)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-43853D)
@@ -13,8 +13,9 @@ The server runs on your Windows machine, reads local usage data, and serves a si
 - Shows Claude Code and Codex usage for the 5-hour and weekly windows.
 - Reads Claude Code usage through a local `statusLine` cache.
 - Reads Codex usage from the newest local `~/.codex/sessions` `rate_limits` snapshot.
-- Works on a phone or tablet connected to the same Wi-Fi network.
-- Tap the dashboard to refresh and request fullscreen mode.
+- Reads Antigravity quota usage percentages from the local Antigravity CLI gRPC server.
+- Starts as a frameless always-on-top desktop floating window.
+- Provides startup and desktop shortcuts for the floating window.
 - Turns red when usage reaches the alert threshold.
 - Uses only Node.js built-in modules. No npm dependencies.
 
@@ -44,17 +45,41 @@ node -v
 ```powershell
 git clone https://github.com/YOUR_NAME/claude-codex-usage-dashboard.git
 cd claude-codex-usage-dashboard
-node server.js
+npm install
+npm start
 ```
 
-You should see output similar to:
+The floating desktop window should open automatically. The old standalone web page mode has been removed.
+
+## Windows Floating Dashboard (Desktop Mode)
+
+Start the dashboard as a real floating desktop window (frameless + always-on-top):
+
+```powershell
+npm install
+npm start
+```
+
+Or run directly from a batch script:
 
 ```text
-Local:  http://localhost:8787
-Device: http://192.168.1.23:8787
+start-dashboard-desktop.bat
 ```
 
-Open `http://localhost:8787` on the Windows machine. To use a phone or tablet, connect it to the same Wi-Fi network and open the `Device` URL.
+This mode starts the local Node server in the background (if not already running) and opens a desktop overlay window that stays on top of the desktop.
+
+### 启动与自启
+
+```powershell
+npm start
+install-desktop-autostart.bat   # 设置开机自启 + 桌面快捷方式（桌面悬浮版）
+uninstall-desktop-autostart.bat # 取消开机自启并移除桌面快捷方式
+```
+
+桌面版右键菜单：
+- Reload / 重载
+- Toggle DevTools / 打开开发者工具
+- Exit / 退出
 
 ## Configure Claude Code Usage
 
@@ -118,27 +143,22 @@ Remove autostart:
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8787` | Dashboard port |
-| `HOST` | `0.0.0.0` | Allows devices on the same Wi-Fi to connect. Use `127.0.0.1` for local-only preview |
+| `HOST` | `127.0.0.1` | Internal local service host |
 | `ALERT_PERCENT` | `85` | Usage percentage that turns the dashboard red |
 | `CODEX_LOOKBACK_DAYS` | `14` | How many days of Codex sessions to scan |
 | `CLAUDE_USAGE_CACHE` | `~/.claude/usage-cache.json` | Claude usage cache path |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex sessions path |
+| `ANTIGRAVITY_LOG_DIR` | `~/.gemini/antigravity-cli/log` | Antigravity CLI log directory, used to discover the local gRPC port |
+| `ANTIGRAVITY_SETTINGS` | `~/.gemini/antigravity-cli/settings.json` | Antigravity CLI settings path |
+| `ANTIGRAVITY_STALE_MINUTES` | `120` | Marks Antigravity quota data as stale after this many minutes |
 | `EXTRA_STATUSLINE_COMMAND` | empty | Extra command for fanout mode |
 
 Example:
 
 ```powershell
 $env:PORT="8790"
-$env:HOST="127.0.0.1"
-node server.js
-```
-
-## Windows Firewall
-
-If your phone or tablet cannot connect, allow the dashboard port through Windows Firewall:
-
-```powershell
-netsh advfirewall firewall add rule name="AIUsageDashboard" dir=in action=allow protocol=TCP localport=8787
+$env:PORT="8790"
+npm start
 ```
 
 ## Privacy
