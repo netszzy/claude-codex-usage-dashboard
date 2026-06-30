@@ -40,7 +40,7 @@ const ERROR_PAGE = `
 let serverProcess = null;
 let serverOwned = false;
 let mainWindow = null;
-let isAlwaysOnTop = false;
+let isAlwaysOnTop = true;
 let dragState = null;
 let tray = null;
 let isQuitting = false;
@@ -143,9 +143,7 @@ function buildInitialWindowBounds() {
   const saved = loadWindowState();
   const area = screen.getPrimaryDisplay().workArea;
   if (saved) {
-    if (typeof saved.alwaysOnTop === 'boolean') {
-      isAlwaysOnTop = saved.alwaysOnTop;
-    }
+    isAlwaysOnTop = saved.alwaysOnTop !== false;
     return clampToScreen({
       x: saved.x,
       y: saved.y,
@@ -446,7 +444,7 @@ async function createWindow() {
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
-    alwaysOnTop: false,
+    alwaysOnTop: true,
     skipTaskbar: true,
     movable: true,
     resizable: false,
@@ -460,6 +458,7 @@ async function createWindow() {
     },
     title: 'Claude / Codex Usage Dashboard',
   });
+  mainWindow.setOpacity(0.94);
 
   applyTopMost(mainWindow, isAlwaysOnTop);
   makeSimpleMenu();

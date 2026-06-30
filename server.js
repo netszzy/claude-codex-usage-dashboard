@@ -594,6 +594,7 @@ body::before {
   touch-action: none;
   -webkit-app-region: no-drag;
   animation: rise 260ms ease-out both;
+  opacity: 0.96;
 }
 
 .watch::after {
@@ -716,11 +717,33 @@ button {
 }
 
 .readout.antigravity-card strong {
-  font-size: 35px;
+  font-size: 32px;
 }
 
 .readout.antigravity-card .detail {
   align-content: center;
+  gap: 10px;
+}
+
+.readout.antigravity-card .detail-row {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.readout.antigravity-card .detail-row:first-child {
+  font-size: 12px;
+}
+
+.readout.antigravity-card .detail-row span:last-child {
+  font-size: 12px;
+}
+
+.readout.antigravity-card .detail-row .metric-pair {
+  color: var(--ink);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
 }
 
 .readout-head {
@@ -905,7 +928,6 @@ body.desktop-shell .watch {
           <strong><span id="num_antigravity_age">--</span><small id="unit_antigravity_age"></small></strong>
         </div>
         <div class="detail">
-          <div class="detail-row"><span>7d</span><span id="refresh_antigravity">no data</span></div>
           <div class="detail-row"><span>group</span><span id="model_antigravity">unknown</span></div>
           <div class="detail-row"><span>other</span><span id="auth_antigravity">unknown</span></div>
         </div>
@@ -1003,13 +1025,21 @@ function setAntigravity(data) {
   const seven = percentValue(data && data.seven);
   const otherFive = percentValue(data && data.other && data.other.five);
   const otherSeven = percentValue(data && data.other && data.other.seven);
-  setText('num_antigravity_age', five === null ? '--' : String(five));
-  setText('unit_antigravity_age', five === null ? '' : '%');
-  setText('refresh_antigravity', seven === null ? 'no data' : String(seven) + '%');
+  setText('num_antigravity_age', five === null && seven === null ? '--' : (five === null ? '--' : String(five)) + '%/' + (seven === null ? '--' : String(seven)));
+  setText('unit_antigravity_age', five === null && seven === null ? '' : '%');
   setText('model_antigravity', data && data.activeLabel ? data.activeLabel : (data && data.model ? data.model : 'unknown'));
-  setText('auth_antigravity', data && data.other
-    ? data.other.label + ' ' + (otherFive === null ? '--' : String(otherFive)) + '/' + (otherSeven === null ? '--' : String(otherSeven)) + '%'
-    : (data && data.error ? data.error : 'no data'));
+  const otherEl = $('auth_antigravity');
+  if (!otherEl) return;
+  if (data && data.other) {
+    otherEl.innerHTML = '';
+    otherEl.append(document.createTextNode(data.other.label + ' '));
+    const metric = document.createElement('b');
+    metric.className = 'metric-pair';
+    metric.textContent = (otherFive === null ? '--' : String(otherFive)) + '/' + (otherSeven === null ? '--' : String(otherSeven)) + '%';
+    otherEl.append(metric);
+  } else {
+    otherEl.textContent = data && data.error ? data.error : 'no data';
+  }
 }
 
 function setOffline() {
