@@ -25,6 +25,12 @@ By default, `server.js` listens on `0.0.0.0` so a phone or tablet on the same Wi
 
 Do not expose this port to the public internet. If you only want local preview, run:
 
+```bash
+HOST=127.0.0.1 node server.js
+```
+
+On Windows PowerShell:
+
 ```powershell
 $env:HOST="127.0.0.1"; node server.js
 ```

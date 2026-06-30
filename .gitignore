@@ -10,6 +10,7 @@ config.json
 *.log
 *.tmp
 *.lnk
+.env
 
 .DS_Store
 Thumbs.db
