@@ -17,6 +17,7 @@ const PORT = envNumber('PORT', 8787);
 const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85);
 const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14);
 const CLAUDE_STALE_MINUTES = envNumber('CLAUDE_STALE_MINUTES', 10);
+const CODEX_STALE_MINUTES = envNumber('CODEX_STALE_MINUTES', 120);
 const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120);
 
 const CLAUDE_CACHE = process.env.CLAUDE_USAGE_CACHE
@@ -27,6 +28,8 @@ const ANTIGRAVITY_LOG_DIR = process.env.ANTIGRAVITY_LOG_DIR
   || path.join(os.homedir(), '.gemini', 'antigravity-cli', 'log');
 const ANTIGRAVITY_SETTINGS = process.env.ANTIGRAVITY_SETTINGS
   || path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
+const ANTIGRAVITY_CACHE = process.env.ANTIGRAVITY_USAGE_CACHE
+  || path.join(path.dirname(CLAUDE_CACHE), 'antigravity-usage-cache.json');
 
 function readJson(filePath) {
   try {
@@ -142,13 +145,16 @@ function readCodexUsage() {
   }
 
   if (!newest) {
-    return { fetchedAt: null, five: null, seven: null };
+    return { fetchedAt: null, five: null, seven: null, stale: true };
   }
+
+  const stale = !newest.timestamp || Date.now() - newest.timestamp > CODEX_STALE_MINUTES * 60000;
 
   return {
     fetchedAt: newest.timestamp,
     five: normalizeCodexWindow(newest.rateLimits.primary),
     seven: normalizeCodexWindow(newest.rateLimits.secondary),
+    stale,
   };
 }
 
@@ -164,7 +170,7 @@ function getCodexUsage() {
   try {
     data = readCodexUsage();
   } catch (error) {
-    data = { fetchedAt: null, five: null, seven: null };
+    data = { fetchedAt: null, five: null, seven: null, stale: true };
   }
 
   codexCache = { fetchedAt: now, data };
@@ -431,22 +437,46 @@ function chooseAntigravityGroup(groups, model) {
   return groups[0];
 }
 
+// design-taste-frontend: Design Read
+function writeAntigravityCache(data) {
+  try {
+    fs.mkdirSync(path.dirname(ANTIGRAVITY_CACHE), { recursive: true });
+    fs.writeFileSync(ANTIGRAVITY_CACHE, JSON.stringify(data, null, 2), 'utf8');
+  } catch (error) {
+    // Ignore write errors
+  }
+}
+
+function readAntigravityFromCacheOrFallback(state, errorMessage) {
+  const staleAfterMs = ANTIGRAVITY_STALE_MINUTES * 60000;
+  const cached = readJson(ANTIGRAVITY_CACHE);
+  if (cached) {
+    return {
+      ...cached,
+      stale: true,
+      error: errorMessage,
+    };
+  }
+  return {
+    fetchedAt: state.refreshAt || null,
+    five: null,
+    seven: null,
+    groups: [],
+    model: state.model,
+    activeLabel: null,
+    other: null,
+    source: 'antigravity-grpc',
+    stale: true,
+    staleAfterMs,
+    error: errorMessage,
+  };
+}
+
 async function readAntigravityUsage() {
   const state = antigravityLogState();
   const staleAfterMs = ANTIGRAVITY_STALE_MINUTES * 60000;
   if (!state.grpcPorts || !state.grpcPorts.length) {
-    return {
-      fetchedAt: state.refreshAt || null,
-      five: null,
-      seven: null,
-      groups: [],
-      model: state.model,
-      activeLabel: null,
-      source: 'antigravity-grpc',
-      stale: true,
-      staleAfterMs,
-      error: 'Antigravity CLI gRPC port not found',
-    };
+    return readAntigravityFromCacheOrFallback(state, 'Antigravity CLI gRPC port not found');
   }
 
   let payload = null;
@@ -460,13 +490,13 @@ async function readAntigravityUsage() {
     }
   }
   if (!payload) {
-    throw lastError || new Error('Antigravity quota gRPC request failed');
+    return readAntigravityFromCacheOrFallback(state, lastError ? lastError.message : 'Antigravity quota gRPC request failed');
   }
   const groups = parseAntigravityQuotaPayload(payload);
   const active = chooseAntigravityGroup(groups, state.model);
   const other = groups.find((group) => group !== active) || null;
 
-  return {
+  const result = {
     fetchedAt: Date.now(),
     five: active ? active.five : null,
     seven: active ? active.seven : null,
@@ -478,6 +508,9 @@ async function readAntigravityUsage() {
     stale: false,
     staleAfterMs,
   };
+
+  writeAntigravityCache(result);
+  return result;
 }
 
 let antigravityCache = { fetchedAt: 0, data: null, promise: null };
@@ -490,19 +523,29 @@ async function getAntigravityUsage() {
   if (antigravityCache.promise) return antigravityCache.promise;
 
   antigravityCache.promise = readAntigravityUsage()
-    .catch((error) => ({
-      fetchedAt: null,
-      five: null,
-      seven: null,
-      groups: [],
-      model: null,
-      activeLabel: null,
-      other: null,
-      source: 'antigravity-grpc',
-      stale: true,
-      staleAfterMs: ANTIGRAVITY_STALE_MINUTES * 60000,
-      error: error.message,
-    }))
+    .catch((error) => {
+      const cached = readJson(ANTIGRAVITY_CACHE);
+      if (cached) {
+        return {
+          ...cached,
+          stale: true,
+          error: error.message,
+        };
+      }
+      return {
+        fetchedAt: null,
+        five: null,
+        seven: null,
+        groups: [],
+        model: null,
+        activeLabel: null,
+        other: null,
+        source: 'antigravity-grpc',
+        stale: true,
+        staleAfterMs: ANTIGRAVITY_STALE_MINUTES * 60000,
+        error: error.message,
+      };
+    })
     .then((data) => {
       antigravityCache = { fetchedAt: Date.now(), data, promise: null };
       return data;
@@ -523,8 +566,8 @@ function pageHtml() {
 <title>Usage Watch</title>
 <style>
 :root {
-  --watch-w: 356px;
-  --watch-h: 416px;
+  --watch-w: 220px;
+  --watch-h: 204px;
   --ink: #f5f2ea;
   --muted: #a6a094;
   --quiet: #6e706e;
@@ -582,8 +625,8 @@ body::before {
   position: relative;
   width: min(var(--watch-w), calc(100vw - 12px));
   min-height: min(var(--watch-h), calc(100vh - 12px));
-  padding: 15px;
-  border-radius: 42px;
+  padding: 12px 14px;
+  border-radius: 28px;
   overflow: hidden;
   background:
     linear-gradient(155deg, rgba(255,255,255,0.11), rgba(255,255,255,0.025) 32%, rgba(255,255,255,0.075) 100%),
@@ -600,8 +643,8 @@ body::before {
 .watch::after {
   content: "";
   position: absolute;
-  inset: 9px;
-  border-radius: 34px;
+  inset: 6px;
+  border-radius: 22px;
   pointer-events: none;
   border: 1px solid rgba(255,255,255,0.07);
   box-shadow: inset 0 0 24px rgba(0,0,0,0.38);
@@ -623,22 +666,9 @@ button {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 10px;
-}
-
-.mark {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border-radius: 13px;
-  background: rgba(255,255,255,0.075);
-  border: 1px solid rgba(255,255,255,0.09);
-  color: var(--ink);
-  font-weight: 800;
-  font-size: 13px;
 }
 
 .title {
@@ -647,8 +677,8 @@ button {
 
 .title strong {
   display: block;
-  font-size: 15px;
-  line-height: 1.05;
+  font-size: 13px;
+  line-height: 1.1;
   font-weight: 700;
   letter-spacing: 0;
 }
@@ -656,21 +686,22 @@ button {
 .title span,
 .status {
   color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0.04em;
+  font-size: 10px;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
 }
 
 .icon-btn {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 26px;
+  height: 26px;
   border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 13px;
+  border-radius: 9px;
   background: rgba(255,255,255,0.07);
   color: var(--ink);
   cursor: pointer;
+  font-size: 11px;
   transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
 }
 
@@ -688,15 +719,15 @@ button {
   z-index: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
-  margin-top: 16px;
+  gap: 10px;
+  margin-top: 0;
 }
 
 .readout {
   min-width: 0;
-  min-height: 176px;
-  padding: 14px;
-  border-radius: 24px;
+  min-height: 76px;
+  padding: 8px 8px;
+  border-radius: 16px;
   background:
     radial-gradient(circle at 50% 0%, rgba(255,255,255,0.095), transparent 58%),
     rgba(255,255,255,0.06);
@@ -707,22 +738,24 @@ button {
 .readout.antigravity-card {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 0.88fr 1.12fr;
-  gap: 12px;
-  min-height: 92px;
+  grid-template-columns: 0.9fr 1.1fr;
+  gap: 10px;
+  min-height: 68px;
+  align-items: center;
 }
 
 .readout.antigravity-card .readout-head {
   margin-bottom: 0;
+  gap: 2px;
 }
 
 .readout.antigravity-card strong {
-  font-size: 32px;
+  font-size: 22px;
 }
 
 .readout.antigravity-card .detail {
   align-content: center;
-  gap: 10px;
+  gap: 3px;
 }
 
 .readout.antigravity-card .detail-row {
@@ -731,74 +764,77 @@ button {
 }
 
 .readout.antigravity-card .detail-row:first-child {
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .readout.antigravity-card .detail-row span:last-child {
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .readout.antigravity-card .detail-row .metric-pair {
   color: var(--ink);
   font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 16px;
-  font-weight: 800;
-  letter-spacing: -0.04em;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .readout-head {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 13px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 6px;
 }
 
 .service {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
 }
 
 .dot {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 10px currentColor;
+  box-shadow: 0 0 8px currentColor;
 }
 
 .readout strong {
   color: var(--ink);
   font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 42px;
-  line-height: 1;
+  font-size: 28px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
 }
 
 .readout small {
   color: var(--quiet);
-  font-size: 15px;
+  font-size: 12px;
 }
 
 .detail {
   display: grid;
-  gap: 9px;
+  gap: 4px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.32;
+  font-size: 11px;
+  line-height: 1.2;
 }
 
 .detail-row {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: 4px;
 }
 
 .detail-row:first-child {
-  font-size: 15px;
+  font-size: 11px;
   line-height: 1.18;
-  font-weight: 700;
+  font-weight: 500;
 }
 
 .detail-row span:last-child {
@@ -819,10 +855,9 @@ button {
   position: relative;
   z-index: 1;
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin: 12px 2px 0;
-  font-size: 11px;
+  justify-content: center;
+  margin: 8px 2px 0;
+  font-size: 10px;
 }
 
 .claude {
@@ -855,88 +890,47 @@ body.desktop-shell .watch {
   min-height: calc(100vh - 8px);
   margin: 4px;
 }
-
-@media (max-width: 370px), (max-height: 410px) {
-  :root {
-    --watch-w: 332px;
-    --watch-h: 296px;
-  }
-
-  .watch {
-    padding: 13px;
-    border-radius: 36px;
-  }
-
-  .readout {
-    min-height: 170px;
-    padding: 13px;
-  }
-
-  .readout.antigravity-card {
-    min-height: 92px;
-  }
-
-  .readout strong {
-    font-size: 38px;
-  }
-
-  .detail {
-    font-size: 12.5px;
-  }
-}
 </style>
 </head>
 <body>
   <main class="watch" aria-label="Claude and Codex usage watch face">
-    <header class="topbar">
-      <div class="mark">CC</div>
-      <div class="title">
-        <strong>Usage cockpit</strong>
-        <span>Claude / Codex</span>
-      </div>
-      <button class="icon-btn" id="refreshBtn" type="button" title="Refresh" aria-label="Refresh">↻</button>
-    </header>
-
     <section class="readouts">
       <article class="readout" aria-label="Claude usage">
         <div class="readout-head">
-          <span class="service claude"><i class="dot"></i>Claude</span>
           <strong><span id="num_claude_five">--</span><small>%</small></strong>
+          <span class="service claude"><i class="dot"></i></span>
         </div>
         <div class="detail">
           <div class="detail-row"><span>7d</span><span><b id="num_claude_seven">--</b>%</span></div>
-          <div class="detail-row"><span>reset</span><span id="reset_claude_five">no data</span></div>
-          <div class="detail-row"><span>age</span><span id="age_claude">no data</span></div>
+          <div class="detail-row"><span></span><span id="reset_claude_five">no data</span></div>
         </div>
       </article>
 
       <article class="readout" aria-label="Codex usage">
         <div class="readout-head">
-          <span class="service codex"><i class="dot"></i>Codex</span>
           <strong><span id="num_codex_five">--</span><small>%</small></strong>
+          <span class="service codex"><i class="dot"></i></span>
         </div>
         <div class="detail">
           <div class="detail-row"><span>7d</span><span><b id="num_codex_seven">--</b>%</span></div>
-          <div class="detail-row"><span>reset</span><span id="reset_codex_five">no data</span></div>
-          <div class="detail-row"><span>age</span><span id="age_codex">no data</span></div>
+          <div class="detail-row"><span></span><span id="reset_codex_five">no data</span></div>
         </div>
       </article>
 
       <article class="readout antigravity-card" aria-label="Antigravity quota refresh">
         <div class="readout-head">
-          <span class="service antigravity"><i class="dot"></i>Antigravity</span>
           <strong><span id="num_antigravity_age">--</span><small id="unit_antigravity_age"></small></strong>
+          <span class="service antigravity"><i class="dot"></i></span>
         </div>
         <div class="detail">
-          <div class="detail-row"><span>group</span><span id="model_antigravity">unknown</span></div>
-          <div class="detail-row"><span>other</span><span id="auth_antigravity">unknown</span></div>
+          <div class="detail-row"><span></span><span id="auth_antigravity">unknown</span></div>
+          <div class="detail-row"><span></span><span id="reset_antigravity_five">no data</span></div>
         </div>
       </article>
     </section>
 
     <footer class="status">
       <span id="global_status">syncing</span>
-      <span>right click for menu</span>
     </footer>
   </main>
 
@@ -961,9 +955,16 @@ function percentValue(data) {
   return data && typeof data.used === 'number' ? Math.round(data.used) : null;
 }
 
-function resetText(timestamp) {
+// design-taste-frontend: Design Read
+function resetText(timestamp, windowMs) {
   if (!timestamp) return 'no data';
-  const seconds = Math.floor((timestamp - Date.now()) / 1000);
+  let targetTime = timestamp;
+  if (windowMs && targetTime < Date.now()) {
+    const elapsed = Date.now() - targetTime;
+    const cycles = Math.floor(elapsed / windowMs) + 1;
+    targetTime = targetTime + cycles * windowMs;
+  }
+  const seconds = Math.floor((targetTime - Date.now()) / 1000);
   if (seconds <= 0) return 'reset';
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
@@ -1015,8 +1016,7 @@ function setService(name, data) {
   const seven = percentValue(data && data.seven);
   setText('num_' + name + '_five', five === null ? '--' : String(five));
   setText('num_' + name + '_seven', seven === null ? '--' : String(seven));
-  setText('reset_' + name + '_five', resetText(data && data.five && data.five.resetAt));
-  setText('age_' + name, sourceAgeText(data && data.fetchedAt, data && data.stale));
+  setText('reset_' + name + '_five', resetText(data && data.five && data.five.resetAt, 5 * 3600000));
   return five;
 }
 
@@ -1028,11 +1028,11 @@ function setAntigravity(data) {
   setText('num_antigravity_age', five === null && seven === null ? '--' : (five === null ? '--' : String(five)) + '%/' + (seven === null ? '--' : String(seven)));
   setText('unit_antigravity_age', five === null && seven === null ? '' : '%');
   setText('model_antigravity', data && data.activeLabel ? data.activeLabel : (data && data.model ? data.model : 'unknown'));
+  setText('reset_antigravity_five', resetText(data && data.five && data.five.resetAt, 5 * 3600000));
   const otherEl = $('auth_antigravity');
   if (!otherEl) return;
   if (data && data.other) {
     otherEl.innerHTML = '';
-    otherEl.append(document.createTextNode(data.other.label + ' '));
     const metric = document.createElement('b');
     metric.className = 'metric-pair';
     metric.textContent = (otherFive === null ? '--' : String(otherFive)) + '/' + (otherSeven === null ? '--' : String(otherSeven)) + '%';
@@ -1101,7 +1101,8 @@ async function refreshUsage() {
 
 function init() {
   installDesktopDrag();
-  $('refreshBtn').addEventListener('click', refreshUsage);
+  const refreshBtn = $('refreshBtn');
+  if (refreshBtn) refreshBtn.addEventListener('click', refreshUsage);
   refreshUsage();
   setInterval(refreshUsage, 2000);
 }

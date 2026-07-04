@@ -45,8 +45,8 @@ let dragState = null;
 let tray = null;
 let isQuitting = false;
 
-const DEFAULT_WIDTH = 364;
-const DEFAULT_HEIGHT = 424;
+const DEFAULT_WIDTH = 228;
+const DEFAULT_HEIGHT = 212;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
