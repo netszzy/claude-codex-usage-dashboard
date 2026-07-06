@@ -566,8 +566,8 @@ function pageHtml() {
 <title>Usage Watch</title>
 <style>
 :root {
-  --watch-w: 220px;
-  --watch-h: 204px;
+  --watch-w: 204px;
+  --watch-h: 132px;
   --ink: #f5f2ea;
   --muted: #a6a094;
   --quiet: #6e706e;
@@ -725,9 +725,13 @@ button {
 
 .readout {
   min-width: 0;
-  min-height: 76px;
-  padding: 8px 8px;
-  border-radius: 16px;
+  min-height: 40px;
+  padding: 6px 8px;
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
   background:
     radial-gradient(circle at 50% 0%, rgba(255,255,255,0.095), transparent 58%),
     rgba(255,255,255,0.06);
@@ -737,44 +741,17 @@ button {
 
 .readout.antigravity-card {
   grid-column: 1 / -1;
+  min-height: 54px;
   display: grid;
-  grid-template-columns: 0.9fr 1.1fr;
-  gap: 10px;
-  min-height: 68px;
+  grid-template-columns: auto 1fr;
   align-items: center;
-}
-
-.readout.antigravity-card .readout-head {
-  margin-bottom: 0;
-  gap: 2px;
-}
-
-.readout.antigravity-card strong {
-  font-size: 22px;
-}
-
-.readout.antigravity-card .detail {
-  align-content: center;
-  gap: 3px;
-}
-
-.readout.antigravity-card .detail-row {
-  font-size: 11px;
-  letter-spacing: 0.02em;
-}
-
-.readout.antigravity-card .detail-row:first-child {
-  font-size: 11px;
-}
-
-.readout.antigravity-card .detail-row span:last-child {
-  font-size: 11px;
+  gap: 8px;
 }
 
 .readout.antigravity-card .detail-row .metric-pair {
   color: var(--ink);
   font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: -0.02em;
 }
@@ -783,8 +760,9 @@ button {
   display: flex;
   flex-direction: row;
   align-items: center;
-  gap: 5px;
-  margin-bottom: 6px;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
 }
 
 .service {
@@ -807,21 +785,26 @@ button {
 .readout strong {
   color: var(--ink);
   font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 28px;
+  font-size: 15px;
   line-height: 1.1;
   letter-spacing: -0.02em;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .readout small {
-  color: var(--quiet);
-  font-size: 12px;
+  color: var(--ink);
+  font-size: 11px;
 }
 
 .detail {
   display: grid;
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 9px;
   line-height: 1.2;
 }
 
@@ -829,35 +812,43 @@ button {
   display: flex;
   justify-content: space-between;
   gap: 4px;
+  min-width: 0;
 }
 
-.detail-row:first-child {
-  font-size: 11px;
+.detail-row-primary {
+  font-size: 9px;
   line-height: 1.18;
   font-weight: 500;
 }
 
-.detail-row span:last-child {
+.detail-value {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   color: #cec8bc;
   text-align: right;
   font-weight: 600;
 }
 
-.detail-row:first-child span:last-child {
+.detail-row-reset {
+  justify-content: center;
+  align-items: center;
+  gap: 6px;
+}
+
+.detail-row-reset .detail-value {
+  flex: none;
+  text-align: left;
+  font-size: 11px;
+}
+
+.detail-row-primary .detail-value {
   color: var(--ink);
 }
 
-.detail-row:first-child b {
+.detail-row-primary b {
   font-size: 1.08em;
-}
-
-.status {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  justify-content: center;
-  margin: 8px 2px 0;
-  font-size: 10px;
 }
 
 .claude {
@@ -897,41 +888,32 @@ body.desktop-shell .watch {
     <section class="readouts">
       <article class="readout" aria-label="Claude usage">
         <div class="readout-head">
-          <strong><span id="num_claude_five">--</span><small>%</small></strong>
-          <span class="service claude"><i class="dot"></i></span>
+          <strong><span id="num_claude_five">--</span><small id="unit_claude_five"></small></strong>
         </div>
         <div class="detail">
-          <div class="detail-row"><span>7d</span><span><b id="num_claude_seven">--</b>%</span></div>
-          <div class="detail-row"><span></span><span id="reset_claude_five">no data</span></div>
+          <div class="detail-row detail-row-reset"><span id="reset_claude_five" class="detail-value">no data</span><span class="service claude"><i class="dot"></i></span></div>
         </div>
       </article>
 
       <article class="readout" aria-label="Codex usage">
         <div class="readout-head">
-          <strong><span id="num_codex_five">--</span><small>%</small></strong>
-          <span class="service codex"><i class="dot"></i></span>
+          <strong><span id="num_codex_five">--</span><small id="unit_codex_five"></small></strong>
         </div>
         <div class="detail">
-          <div class="detail-row"><span>7d</span><span><b id="num_codex_seven">--</b>%</span></div>
-          <div class="detail-row"><span></span><span id="reset_codex_five">no data</span></div>
+          <div class="detail-row detail-row-reset"><span id="reset_codex_five" class="detail-value">no data</span><span class="service codex"><i class="dot"></i></span></div>
         </div>
       </article>
 
       <article class="readout antigravity-card" aria-label="Antigravity quota refresh">
         <div class="readout-head">
           <strong><span id="num_antigravity_age">--</span><small id="unit_antigravity_age"></small></strong>
-          <span class="service antigravity"><i class="dot"></i></span>
         </div>
         <div class="detail">
-          <div class="detail-row"><span></span><span id="auth_antigravity">unknown</span></div>
-          <div class="detail-row"><span></span><span id="reset_antigravity_five">no data</span></div>
+          <div class="detail-row detail-row-primary"><span></span><span id="auth_antigravity" class="detail-value">unknown</span></div>
+          <div class="detail-row detail-row-reset"><span id="reset_antigravity_five" class="detail-value">no data</span><span class="service antigravity"><i class="dot"></i></span></div>
         </div>
       </article>
     </section>
-
-    <footer class="status">
-      <span id="global_status">syncing</span>
-    </footer>
   </main>
 
 <script>
@@ -1014,8 +996,8 @@ function setText(id, value) {
 function setService(name, data) {
   const five = percentValue(data && data.five);
   const seven = percentValue(data && data.seven);
-  setText('num_' + name + '_five', five === null ? '--' : String(five));
-  setText('num_' + name + '_seven', seven === null ? '--' : String(seven));
+  setText('num_' + name + '_five', five === null && seven === null ? '--' : (five === null ? '--' : String(five)) + '%/' + (seven === null ? '--' : String(seven)));
+  setText('unit_' + name + '_five', five === null && seven === null ? '' : '%');
   setText('reset_' + name + '_five', resetText(data && data.five && data.five.resetAt, 5 * 3600000));
   return five;
 }
@@ -1046,7 +1028,6 @@ function setOffline() {
   setService('claude', {});
   setService('codex', {});
   setAntigravity({});
-  setText('global_status', 'disconnected');
 }
 
 function installDesktopDrag() {
@@ -1089,11 +1070,6 @@ async function refreshUsage() {
     setService('claude', usage.claude || {});
     setService('codex', usage.codex || {});
     setAntigravity(usage.antigravity || {});
-    setText('global_status', 'updated ' + new Date().toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    }));
   } catch (error) {
     setOffline();
   }
