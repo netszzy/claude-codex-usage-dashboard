@@ -46,7 +46,7 @@ let tray = null;
 let isQuitting = false;
 
 const DEFAULT_WIDTH = 212;
-const DEFAULT_HEIGHT = 140;
+const DEFAULT_HEIGHT = 144;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
