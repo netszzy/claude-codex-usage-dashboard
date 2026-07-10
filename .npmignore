@@ -1,0 +1,9 @@
+.codegraph/
+config.json
+*.bak
+*.bak-*
+*.log
+*.tmp
+*.lnk
+usage-cache.json
+streamdeck-usage.json

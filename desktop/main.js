@@ -3,18 +3,29 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+app.setName('Usage Watch');
+
 const PORT = Number(process.env.DASHBOARD_PORT || process.env.PORT || 8787);
 const HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
+  throw new Error('DASHBOARD_PORT must be an integer from 1 to 65535');
+}
+if (!LOCAL_HOSTS.has(HOST)) {
+  throw new Error('DASHBOARD_HOST must be a loopback address');
+}
 let DATA_DIR = null;
 let WINDOW_STATE_FILE = null;
 
-const DASHBOARD_URL = `http://${HOST}:${PORT}`;
-const HEALTH_URL = `${DASHBOARD_URL}/api/usage`;
+const URL_HOST = HOST.includes(':') ? `[${HOST}]` : HOST;
+const DASHBOARD_URL = `http://${URL_HOST}:${PORT}`;
+const HEALTH_URL = `${DASHBOARD_URL}/healthz`;
 const ERROR_PAGE = `
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
   <title>Usage Dashboard unavailable</title>
   <style>
     html, body { margin: 0; width: 100%; height: 100%; }
@@ -30,7 +41,7 @@ const ERROR_PAGE = `
       本地服务未在规定时间启动，请稍后重试。可先点 Reload。
     </p>
     <div>
-      <button onclick="location.reload()">Reload</button>
+      <button onclick="window.desktopHud && window.desktopHud.retry()">Retry</button>
     </div>
   </div>
 </body>
@@ -44,9 +55,10 @@ let isAlwaysOnTop = true;
 let dragState = null;
 let tray = null;
 let isQuitting = false;
+let lastServerError = '';
 
-const DEFAULT_WIDTH = 212;
-const DEFAULT_HEIGHT = 144;
+const DEFAULT_WIDTH = 300;
+const DEFAULT_HEIGHT = 224;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,11 +69,17 @@ function buildErrorPageUrl() {
 }
 
 async function isDashboardReady() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
   try {
-    const res = await fetch(HEALTH_URL, { cache: 'no-store' });
-    return res.ok;
+    const res = await fetch(HEALTH_URL, { cache: 'no-store', signal: controller.signal });
+    if (!res.ok || res.headers.get('x-usage-dashboard') !== '1') return false;
+    const body = await res.json();
+    return body && body.ok === true;
   } catch (error) {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -83,6 +101,10 @@ function ensureStateDir() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const legacyState = path.join(app.getPath('appData'), 'Electron', 'window-state.json');
+    if (!fs.existsSync(WINDOW_STATE_FILE) && fs.existsSync(legacyState)) {
+      fs.copyFileSync(legacyState, WINDOW_STATE_FILE, fs.constants.COPYFILE_EXCL);
     }
   } catch (error) {
     console.warn('[dashboard-desktop] cannot create state dir:', error.message);
@@ -130,7 +152,8 @@ function saveWindowState(bounds) {
 }
 
 function clampToScreen(bounds) {
-  const area = screen.getPrimaryDisplay().workArea;
+  const display = screen.getDisplayMatching(bounds) || screen.getPrimaryDisplay();
+  const area = display.workArea;
   return {
     x: Math.min(Math.max(area.x, bounds.x), Math.max(area.x, area.width + area.x - bounds.width)),
     y: Math.min(Math.max(area.y, bounds.y), Math.max(area.y, area.height + area.y - bounds.height)),
@@ -140,6 +163,7 @@ function clampToScreen(bounds) {
 }
 
 function buildInitialWindowBounds() {
+  ensureStateDir();
   const saved = loadWindowState();
   const area = screen.getPrimaryDisplay().workArea;
   if (saved) {
@@ -173,9 +197,18 @@ function spawnServer() {
       PORT: String(PORT),
       HOST,
       NODE_NO_WARNINGS: '1',
+      ELECTRON_RUN_AS_NODE: '1',
     },
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
+
+  if (child.stderr) {
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk) => {
+      lastServerError = String(chunk).trim().slice(-1000);
+      if (lastServerError) console.error('[dashboard-desktop] server:', lastServerError);
+    });
+  }
 
   child.on('error', (error) => {
     console.error('[dashboard-desktop] server spawn failed:', error.message);
@@ -183,6 +216,10 @@ function spawnServer() {
 
   child.on('exit', (code, signal) => {
     console.log('[dashboard-desktop] server exited:', code, signal);
+    if (serverProcess === child) {
+      serverProcess = null;
+      serverOwned = false;
+    }
     if (mainWindow && mainWindow.webContents && mainWindow.webContents.isLoadingMainFrame()) {
       mainWindow.webContents.loadURL(buildErrorPageUrl());
     }
@@ -232,17 +269,20 @@ function bindWindowStatePersistence(window) {
 function bindDragIpc() {
   ipcMain.on('hud-drag-begin', (event, point) => {
     const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window || window.isDestroyed() || !point) return;
+    if (!window || window !== mainWindow || window.isDestroyed() || !point) return;
+    const startX = Number(point.x);
+    const startY = Number(point.y);
+    if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
     dragState = {
       window,
-      startX: Number(point.x),
-      startY: Number(point.y),
+      startX,
+      startY,
       bounds: window.getBounds(),
     };
   });
 
   ipcMain.on('hud-drag-move', (event, point) => {
-    if (!dragState || dragState.window.isDestroyed() || !point) return;
+    if (!dragState || event.sender !== dragState.window.webContents || dragState.window.isDestroyed() || !point) return;
     const nextX = Number(point.x);
     const nextY = Number(point.y);
     if (!Number.isFinite(nextX) || !Number.isFinite(nextY)) return;
@@ -253,11 +293,21 @@ function bindDragIpc() {
     });
   });
 
-  ipcMain.on('hud-drag-end', () => {
+  ipcMain.on('hud-drag-end', (event) => {
+    if (!dragState || event.sender !== dragState.window.webContents) return;
     if (dragState && dragState.window && !dragState.window.isDestroyed()) {
       saveWindowState(dragState.window.getBounds());
     }
     dragState = null;
+  });
+
+  ipcMain.on('hud-retry', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || mainWindow.isDestroyed()) return;
+    const ready = await ensureServer();
+    const targetUrl = ready ? `${DASHBOARD_URL}/?mode=desktop` : buildErrorPageUrl();
+    await mainWindow.loadURL(targetUrl).catch((error) => {
+      lastServerError = error.message;
+    });
   });
 }
 
@@ -453,17 +503,33 @@ async function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
       backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.js'),
     },
     title: 'Claude / Codex Usage Dashboard',
   });
-  mainWindow.setOpacity(0.94);
+  mainWindow.setOpacity(1);
 
   applyTopMost(mainWindow, isAlwaysOnTop);
   makeSimpleMenu();
   attachContextMenu(mainWindow);
   bindWindowStatePersistence(mainWindow);
+
+  const dashboardOrigin = new URL(DASHBOARD_URL).origin;
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
+  mainWindow.webContents.on('will-navigate', (event, targetUrl) => {
+    try {
+      if (new URL(targetUrl).origin !== dashboardOrigin) event.preventDefault();
+    } catch {
+      event.preventDefault();
+    }
+  });
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
+  });
 
   const targetUrl = ready
     ? `${DASHBOARD_URL}?mode=desktop`
@@ -510,29 +576,38 @@ function stopServer() {
   }
 }
 
-app.whenReady().then(async () => {
-  try {
-    bindDragIpc();
-    ensureTray();
-    await createWindow();
-  } catch (error) {
-    console.error('[dashboard-desktop] startup failed:', error.message);
-    if (mainWindow) {
-      mainWindow.loadURL(buildErrorPageUrl()).catch(() => {});
-      mainWindow.show();
-    } else {
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', showWindow);
+
+  app.whenReady().then(async () => {
+    try {
+      bindDragIpc();
+      ensureTray();
+      await createWindow();
+    } catch (error) {
+      lastServerError = error.message;
+      console.error('[dashboard-desktop] startup failed:', error.message);
+      if (mainWindow) {
+        mainWindow.loadURL(buildErrorPageUrl()).catch(() => {});
+        mainWindow.show();
+      } else {
+        app.quit();
+      }
+    }
+  });
+
+  app.on('before-quit', () => {
+    isQuitting = true;
+    stopServer();
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin' && isQuitting) {
       app.quit();
     }
-  }
-});
-
-app.on('before-quit', () => {
-  isQuitting = true;
-  stopServer();
-});
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin' && isQuitting) {
-    app.quit();
-  }
-});
+  });
+}

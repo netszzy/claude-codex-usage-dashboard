@@ -1,180 +1,156 @@
 # Claude / Codex Usage Dashboard
 
-An unofficial local floating desktop dashboard for viewing Claude Code and Codex usage limits.
+一个非官方的 Windows 本地悬浮面板，用于查看 Claude Code、Codex 和 Antigravity 的配额使用情况。
 
-The desktop window runs on your Windows machine, reads local usage data, and uses a localhost-only internal service.
+面板只读取本机缓存与日志，内部 HTTP 服务严格绑定 loopback，不加载远程字体、脚本或图片。
 
-![Status](https://img.shields.io/badge/platform-Windows-767FC6)
-![Node](https://img.shields.io/badge/node-%3E%3D18-43853D)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+## 功能
 
-## Features
+- 显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
+- 明确显示服务名、5H/7D 含义、数据年龄以及 LIVE、STALE、OFFLINE 状态。
+- 数据过期后不再把历史重置时间推算成新的未来周期。
+- Codex 日志按修改时间排序，并从文件尾部反向分块读取最新 rate_limits，避免周期性全量扫描。
+- Antigravity 在解析到有效配额前不会覆盖最后一份有效缓存。
+- 提供无边框、透明、始终置顶的 Electron 悬浮窗和托盘恢复入口。
+- 开机自启安装器只处理本项目拥有的快捷方式。
+- 使用严格 CSP、loopback Host 校验、沙箱 renderer 和受限 preload。
+- 使用 Node.js 内置测试框架提供回归测试。
 
-- Shows Claude Code and Codex usage for the 5-hour and weekly windows.
-- Reads Claude Code usage through a local `statusLine` cache.
-- Reads Codex usage from the newest local `~/.codex/sessions` `rate_limits` snapshot.
-- Reads Antigravity quota usage percentages from the local Antigravity CLI gRPC server.
-- Starts as a frameless always-on-top desktop floating window.
-- Provides startup and desktop shortcuts for the floating window.
-- Turns red when usage reaches the alert threshold.
-- Uses only Node.js built-in modules. No npm dependencies.
+## 重要限制
 
-## Important Limitations
+配额只会在对应 CLI 写入新数据后更新：
 
-Usage numbers only update after you actually use Claude Code or Codex.
+- Claude 数据来自 Claude Code statusLine 缓存。网页或 Claude 桌面客户端不会刷新该缓存。
+- Codex 数据来自 ~/.codex/sessions 中最新的 rate_limits 事件。
+- Antigravity 数据来自本机 Antigravity CLI gRPC 服务；连接失败时保留最后有效值并标记为 stale/offline。
 
-Claude Code usage comes from `statusLine`, so opening Claude in the web app or desktop app will not update this dashboard. Codex usage is read from local Codex session files, so it updates only after Codex writes new session data.
+本项目与 Anthropic、OpenAI 或 Google 无隶属关系，也不包含其官方 Logo。
 
-This project is not affiliated with Anthropic or OpenAI. It does not include official logos. Make sure your own use of third-party names, trademarks, and local tool output formats follows the relevant terms.
+## 要求
 
-## Requirements
+- Windows 10/11
+- Node.js 22.12 或更高版本（Electron 43 的安装要求）
+- Claude Code 和/或 Codex CLI
+- 如需 Antigravity 卡片：本机运行 Antigravity CLI
 
-- Windows
-- Node.js 18 or newer
-- Claude Code, with `statusLine` configured for real Claude usage
-- Codex, with local `~/.codex/sessions` data
+检查环境：
 
-Check Node.js:
-
-```powershell
+~~~powershell
 node -v
-```
+npm -v
+~~~
 
-## Quick Start
+## 快速开始
 
-```powershell
+~~~powershell
 git clone https://github.com/YOUR_NAME/claude-codex-usage-dashboard.git
 cd claude-codex-usage-dashboard
 npm install
 npm start
-```
+~~~
 
-The floating desktop window should open automatically. The old standalone web page mode has been removed.
+也可以双击 start-dashboard-desktop.bat。
 
-## Windows Floating Dashboard (Desktop Mode)
+Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现有窗口，不会创建第二套进程。
 
-Start the dashboard as a real floating desktop window (frameless + always-on-top):
+## Claude statusLine 配置
 
-```powershell
-npm install
-npm start
-```
+直接配置：
 
-Or run directly from a batch script:
-
-```text
-start-dashboard-desktop.bat
-```
-
-This mode starts the local Node server in the background (if not already running) and opens a desktop overlay window that stays on top of the desktop.
-
-### 启动与自启
-
-```powershell
-npm start
-install-desktop-autostart.bat   # 设置开机自启 + 桌面快捷方式（桌面悬浮版）
-uninstall-desktop-autostart.bat # 取消开机自启并移除桌面快捷方式
-```
-
-桌面版右键菜单：
-- Reload / 重载
-- Toggle DevTools / 打开开发者工具
-- Exit / 退出
-
-## Configure Claude Code Usage
-
-Run:
-
-```powershell
+~~~powershell
 .\setup-claude-statusline.bat
-```
+~~~
 
-Then:
+脚本会先强制备份 ~/.claude/settings.json，再通过同目录临时文件原子替换。备份失败时不会继续覆盖。
 
-1. Fully quit Claude Code.
-2. Open Claude Code again.
-3. Send one message.
-4. Refresh the dashboard.
+如果已经配置了其他 statusLine，请使用 fanout：
 
-The Claude card will start reading `~/.claude/usage-cache.json`.
-
-## If You Already Have a statusLine
-
-Claude Code supports one `statusLine.command` at a time. If you already use another statusLine script, such as a Stream Deck integration or a custom prompt status line, use fanout mode.
-
-Copy the example config:
-
-```powershell
-Copy-Item .\config.example.json .\config.json
-```
-
-Edit `config.json`:
-
-```json
-{
-  "extraStatuslineCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\.claude\\your-existing-statusline.ps1\""
-}
-```
-
-Then run:
-
-```powershell
+~~~powershell
 .\setup-claude-statusline.bat --fanout
-```
+~~~
 
-This sends the same Claude Code statusLine JSON to both this dashboard and your existing command.
+fanout 模式会把原命令保存到忽略提交的 config.json，然后让 statusline-both.js 同时更新面板缓存并调用原命令。如果 config.json 已包含不同命令，脚本会停止并要求人工确认。
 
-## Start Automatically on Login
+配置后：
 
-Install autostart:
+1. 完全退出并重新打开 Claude Code。
+2. 发送一条消息。
+3. 面板会在下一次轮询时更新。
 
-```powershell
-.\install-autostart.bat
-```
+## Windows 自启与快捷方式
 
-Remove autostart:
+安装：
 
-```powershell
-.\uninstall-autostart.bat
-```
+~~~powershell
+.\install-desktop-autostart.bat
+~~~
 
-## Environment Variables
+卸载：
 
-| Variable | Default | Description |
+~~~powershell
+.\uninstall-desktop-autostart.bat
+~~~
+
+安装脚本会在 Startup 和 Desktop 创建 AIUsageDashboardDesktop.lnk。如果同名快捷方式不属于本项目，脚本会拒绝覆盖；卸载时也会跳过外部快捷方式。
+
+托盘和右键菜单提供显示/隐藏、重载、始终置顶、开发者工具和退出。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PORT` | `8787` | Dashboard port |
-| `HOST` | `127.0.0.1` | Internal local service host |
-| `ALERT_PERCENT` | `85` | Usage percentage that turns the dashboard red |
-| `CODEX_LOOKBACK_DAYS` | `14` | How many days of Codex sessions to scan |
-| `CLAUDE_USAGE_CACHE` | `~/.claude/usage-cache.json` | Claude usage cache path |
-| `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex sessions path |
-| `ANTIGRAVITY_LOG_DIR` | `~/.gemini/antigravity-cli/log` | Antigravity CLI log directory, used to discover the local gRPC port |
-| `ANTIGRAVITY_SETTINGS` | `~/.gemini/antigravity-cli/settings.json` | Antigravity CLI settings path |
-| `ANTIGRAVITY_STALE_MINUTES` | `120` | Marks Antigravity quota data as stale after this many minutes |
-| `EXTRA_STATUSLINE_COMMAND` | empty | Extra command for fanout mode |
+| PORT | 8787 | 直接运行 server.js 时的端口 |
+| HOST | 127.0.0.1 | 仅允许 127.0.0.1、localhost 或 ::1 |
+| DASHBOARD_PORT | 8787 | Electron 使用的服务端口 |
+| DASHBOARD_HOST | 127.0.0.1 | Electron 使用的服务地址，仅允许 loopback |
+| ALERT_PERCENT | 85 | 进入红色告警状态的使用率 |
+| CODEX_LOOKBACK_DAYS | 14 | 查找 Codex 会话文件的天数 |
+| CLAUDE_STALE_MINUTES | 10 | Claude 数据过期阈值 |
+| CODEX_STALE_MINUTES | 120 | Codex 数据过期阈值 |
+| ANTIGRAVITY_STALE_MINUTES | 120 | Antigravity 数据过期阈值 |
+| CLAUDE_USAGE_CACHE | ~/.claude/usage-cache.json | Claude 缓存路径 |
+| CODEX_SESSIONS_DIR | ~/.codex/sessions | Codex 会话目录 |
+| ANTIGRAVITY_LOG_DIR | ~/.gemini/antigravity-cli/log | Antigravity 日志目录 |
+| ANTIGRAVITY_SETTINGS | ~/.gemini/antigravity-cli/settings.json | Antigravity 设置路径 |
+| ANTIGRAVITY_USAGE_CACHE | ~/.claude-codex-usage-dashboard/antigravity-usage-cache.json | Antigravity last-good 缓存 |
+| EXTRA_STATUSLINE_COMMAND | 空 | fanout 的额外命令，优先于 config.json |
 
-Example:
+示例：
 
-```powershell
-$env:PORT="8790"
-$env:PORT="8790"
+~~~powershell
+$env:DASHBOARD_PORT = '8790'
 npm start
-```
+~~~
 
-## Privacy
+## 本地 API
 
-Data stays on your machine. The server reads local Claude and Codex usage records, but does not upload them anywhere.
+- GET /healthz：轻量健康检查，不读取日志。
+- GET /api/usage：返回三类配额和 config.alertPercent。
+- GET /?mode=desktop：HUD 页面。
 
-Do not commit:
+其他 Host、方法和路径会返回 403、405 或 404。
 
-- `~/.claude/usage-cache.json`
-- `~/.codex/sessions`
-- `~/.claude/settings.json`
-- `config.json`
+## 测试
 
-## Uploading to GitHub
+~~~powershell
+npm test
+npm run check
+npm audit
+~~~
 
-See [GITHUB_UPLOAD_GUIDE.md](GITHUB_UPLOAD_GUIDE.md) for a first-time step-by-step guide.
+npm run check 会检查所有 JavaScript 文件语法并运行测试。
+
+## 隐私
+
+- 页面不加载任何远程资源。
+- 服务只监听本机 loopback。
+- API 只返回配额摘要、状态和模型/分组标签，不返回会话正文。
+- Antigravity gRPC 请求只发往 127.0.0.1。
+- 项目不会上传本地缓存或日志。
+
+不要提交 Claude/Codex 本地缓存、Claude 设置、config.json、凭据或可能暴露账号/路径/工作区的截图。
+
+安全边界详见 [SECURITY.md](SECURITY.md)，首次上传步骤见 [GITHUB_UPLOAD_GUIDE.md](GITHUB_UPLOAD_GUIDE.md)。
 
 ## License
 

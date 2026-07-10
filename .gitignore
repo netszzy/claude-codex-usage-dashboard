@@ -15,6 +15,7 @@ config.json
 Thumbs.db
 .vscode/
 .idea/
+.codegraph/
 
 usage-cache.json
 streamdeck-usage.json

@@ -7,18 +7,35 @@ const path = require('path');
 const os = require('os');
 
 const HOST = process.env.HOST || '127.0.0.1';
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
-function envNumber(name, fallback) {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) ? value : fallback;
+if (!LOCAL_HOSTS.has(HOST)) {
+  throw new Error('HOST must be a loopback address: 127.0.0.1, localhost, or ::1');
 }
 
-const PORT = envNumber('PORT', 8787);
-const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85);
-const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14);
-const CLAUDE_STALE_MINUTES = envNumber('CLAUDE_STALE_MINUTES', 10);
-const CODEX_STALE_MINUTES = envNumber('CODEX_STALE_MINUTES', 120);
-const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120);
+function envNumber(name, fallback, options = {}) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  if (options.integer && !Number.isInteger(value)) {
+    throw new Error(`${name} must be an integer`);
+  }
+  if (options.min !== undefined && value < options.min) {
+    throw new Error(`${name} must be at least ${options.min}`);
+  }
+  if (options.max !== undefined && value > options.max) {
+    throw new Error(`${name} must be at most ${options.max}`);
+  }
+  return value;
+}
+
+const PORT = envNumber('PORT', 8787, { integer: true, min: 1, max: 65535 });
+const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85, { min: 0, max: 100 });
+const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14, { integer: true, min: 1, max: 365 });
+const CLAUDE_STALE_MINUTES = envNumber('CLAUDE_STALE_MINUTES', 10, { min: 0 });
+const CODEX_STALE_MINUTES = envNumber('CODEX_STALE_MINUTES', 120, { min: 0 });
+const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120, { min: 0 });
+const CODEX_SCAN_CHUNK_BYTES = 256 * 1024;
+const CODEX_MAX_LINE_BYTES = 2 * 1024 * 1024;
 
 const CLAUDE_CACHE = process.env.CLAUDE_USAGE_CACHE
   || path.join(os.homedir(), '.claude', 'usage-cache.json');
@@ -29,13 +46,37 @@ const ANTIGRAVITY_LOG_DIR = process.env.ANTIGRAVITY_LOG_DIR
 const ANTIGRAVITY_SETTINGS = process.env.ANTIGRAVITY_SETTINGS
   || path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
 const ANTIGRAVITY_CACHE = process.env.ANTIGRAVITY_USAGE_CACHE
-  || path.join(path.dirname(CLAUDE_CACHE), 'antigravity-usage-cache.json');
+  || path.join(os.homedir(), '.claude-codex-usage-dashboard', 'antigravity-usage-cache.json');
+const LEGACY_ANTIGRAVITY_CACHE = process.env.ANTIGRAVITY_USAGE_CACHE
+  ? null
+  : path.join(path.dirname(CLAUDE_CACHE), 'antigravity-usage-cache.json');
+const DASHBOARD_HTML = fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
+const DASHBOARD_CSS = fs.readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
+const DASHBOARD_JS = fs.readFileSync(path.join(__dirname, 'dashboard.js'), 'utf8');
 
 function readJson(filePath) {
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch (error) {
     return null;
+  }
+}
+
+function writeJsonAtomic(filePath, data) {
+  const directory = path.dirname(filePath);
+  const temporaryPath = path.join(
+    directory,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`,
+  );
+  fs.mkdirSync(directory, { recursive: true });
+  try {
+    fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(temporaryPath, filePath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {}
+    throw error;
   }
 }
 
@@ -91,70 +132,139 @@ function getCodexDayDirectory(date) {
   );
 }
 
-function readCodexUsage() {
-  if (!fs.existsSync(CODEX_SESSIONS)) {
-    return { fetchedAt: null, five: null, seven: null };
+function parseCodexEventLine(lineBuffer) {
+  if (!lineBuffer || !lineBuffer.length || lineBuffer.length > CODEX_MAX_LINE_BYTES) return null;
+  const line = lineBuffer.toString('utf8').trim();
+  if (!line || !line.includes('token_count')) return null;
+
+  let event = null;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    return null;
   }
 
-  const now = new Date();
-  let newest = null;
+  const payload = event && event.payload;
+  if (!payload || payload.type !== 'token_count' || !payload.rate_limits) return null;
+  const timestamp = Date.parse(event.timestamp || 0);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return { timestamp, rateLimits: payload.rate_limits };
+}
 
+function readLatestCodexSnapshot(filePath) {
+  const descriptor = fs.openSync(filePath, 'r');
+  try {
+    const size = fs.fstatSync(descriptor).size;
+    let position = size;
+    let suffix = Buffer.alloc(0);
+    let discardSuffix = false;
+
+    while (position > 0) {
+      const start = Math.max(0, position - CODEX_SCAN_CHUNK_BYTES);
+      const chunk = Buffer.allocUnsafe(position - start);
+      const bytesRead = fs.readSync(descriptor, chunk, 0, chunk.length, start);
+      const combined = Buffer.concat([chunk.subarray(0, bytesRead), suffix]);
+      let lineEnd = combined.length;
+      let skipLine = discardSuffix;
+
+      for (let index = combined.length - 1; index >= 0; index -= 1) {
+        if (combined[index] !== 0x0a) continue;
+        const line = combined.subarray(index + 1, lineEnd);
+        if (skipLine) {
+          skipLine = false;
+        } else {
+          const snapshot = parseCodexEventLine(line);
+          if (snapshot) return snapshot;
+        }
+        lineEnd = index;
+      }
+
+      const prefix = combined.subarray(0, lineEnd);
+      if (skipLine || prefix.length > CODEX_MAX_LINE_BYTES) {
+        suffix = Buffer.alloc(0);
+        discardSuffix = true;
+      } else {
+        suffix = Buffer.from(prefix);
+        discardSuffix = false;
+      }
+      position = start;
+    }
+
+    return discardSuffix ? null : parseCodexEventLine(suffix);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function listCodexSessionFiles(now = new Date()) {
+  const candidates = [];
   for (let dayOffset = 0; dayOffset < CODEX_LOOKBACK_DAYS; dayOffset += 1) {
     const day = new Date(now.getTime() - dayOffset * 86400000);
     const dir = getCodexDayDirectory(day);
-    if (!fs.existsSync(dir)) continue;
-
-    let files = [];
+    let entries = [];
     try {
-      files = fs.readdirSync(dir)
-        .filter((fileName) => fileName.startsWith('rollout-') && fileName.endsWith('.jsonl'));
-    } catch (error) {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
       continue;
     }
 
-    for (const fileName of files) {
-      const filePath = path.join(dir, fileName);
-      let lines = [];
-      try {
-        lines = fs.readFileSync(filePath, 'utf8').split('\n');
-      } catch (error) {
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.startsWith('rollout-') || !entry.name.endsWith('.jsonl')) {
         continue;
       }
-
-      for (const line of lines) {
-        if (!line || !line.includes('token_count')) continue;
-
-        let event = null;
-        try {
-          event = JSON.parse(line);
-        } catch (error) {
-          continue;
-        }
-
-        const payload = event && event.payload;
-        if (!payload || payload.type !== 'token_count' || !payload.rate_limits) continue;
-
-        const timestamp = Date.parse(event.timestamp || 0);
-        if (!timestamp) continue;
-
-        if (!newest || timestamp > newest.timestamp) {
-          newest = { timestamp, rateLimits: payload.rate_limits };
-        }
-      }
+      const filePath = path.join(dir, entry.name);
+      try {
+        candidates.push({ filePath, mtimeMs: fs.statSync(filePath).mtimeMs });
+      } catch {}
     }
+  }
+  return candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+}
+
+function readCodexUsage() {
+  if (!fs.existsSync(CODEX_SESSIONS)) {
+    return {
+      fetchedAt: null,
+      five: null,
+      seven: null,
+      source: 'codex-sessions',
+      stale: true,
+      staleAfterMs: CODEX_STALE_MINUTES * 60000,
+    };
+  }
+
+  let newest = null;
+  for (const candidate of listCodexSessionFiles()) {
+    if (newest && candidate.mtimeMs < newest.timestamp) break;
+    try {
+      const snapshot = readLatestCodexSnapshot(candidate.filePath);
+      if (snapshot && (!newest || snapshot.timestamp > newest.timestamp)) {
+        newest = snapshot;
+      }
+    } catch {}
   }
 
   if (!newest) {
-    return { fetchedAt: null, five: null, seven: null, stale: true };
+    return {
+      fetchedAt: null,
+      five: null,
+      seven: null,
+      source: 'codex-sessions',
+      stale: true,
+      staleAfterMs: CODEX_STALE_MINUTES * 60000,
+    };
   }
 
-  const stale = !newest.timestamp || Date.now() - newest.timestamp > CODEX_STALE_MINUTES * 60000;
+  const staleAfterMs = CODEX_STALE_MINUTES * 60000;
+  const stale = Date.now() - newest.timestamp > staleAfterMs;
 
   return {
     fetchedAt: newest.timestamp,
     five: normalizeCodexWindow(newest.rateLimits.primary),
     seven: normalizeCodexWindow(newest.rateLimits.secondary),
+    source: 'codex-sessions',
     stale,
+    staleAfterMs,
   };
 }
 
@@ -170,7 +280,15 @@ function getCodexUsage() {
   try {
     data = readCodexUsage();
   } catch (error) {
-    data = { fetchedAt: null, five: null, seven: null, stale: true };
+    data = {
+      fetchedAt: null,
+      five: null,
+      seven: null,
+      source: 'codex-sessions',
+      stale: true,
+      staleAfterMs: CODEX_STALE_MINUTES * 60000,
+      error: error.message,
+    };
   }
 
   codexCache = { fetchedAt: now, data };
@@ -210,14 +328,21 @@ function readProtoVarint(buffer, offset) {
   let value = 0n;
   let shift = 0n;
   let pos = offset;
-  while (pos < buffer.length) {
+  let bytes = 0;
+  while (pos < buffer.length && bytes < 10) {
     const byte = buffer[pos];
     pos += 1;
+    bytes += 1;
     value |= BigInt(byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) break;
+    if ((byte & 0x80) === 0) {
+      if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error('Protobuf varint exceeds the safe integer range');
+      }
+      return [Number(value), pos];
+    }
     shift += 7n;
   }
-  return [Number(value), pos];
+  throw new Error('Invalid protobuf varint');
 }
 
 function parseProtoFields(buffer) {
@@ -235,19 +360,24 @@ function parseProtoFields(buffer) {
       fields.push({ field, wire, value });
       offset = next;
     } else if (wire === 1) {
+      if (offset + 8 > buffer.length) throw new Error('Truncated protobuf fixed64 field');
       fields.push({ field, wire, value: buffer.readDoubleLE(offset) });
       offset += 8;
     } else if (wire === 2) {
       const [length, next] = readProtoVarint(buffer, offset);
       offset = next;
+      if (length < 0 || offset + length > buffer.length) {
+        throw new Error('Truncated protobuf length-delimited field');
+      }
       const raw = buffer.subarray(offset, offset + length);
       fields.push({ field, wire, raw, text: raw.toString('utf8') });
       offset += length;
     } else if (wire === 5) {
+      if (offset + 4 > buffer.length) throw new Error('Truncated protobuf fixed32 field');
       fields.push({ field, wire, value: buffer.readFloatLE(offset) });
       offset += 4;
     } else {
-      break;
+      throw new Error(`Unsupported protobuf wire type: ${wire}`);
     }
   }
   return fields;
@@ -261,6 +391,7 @@ function parseProtoTimestamp(buffer) {
 
 function grpcFramePayload(buffer) {
   if (!buffer || buffer.length < 5) return null;
+  if (buffer[0] !== 0) return null;
   const length = buffer.readUInt32BE(1);
   if (buffer.length < 5 + length) return null;
   return buffer.subarray(5, 5 + length);
@@ -361,8 +492,17 @@ function callAntigravityQuota(port) {
       te: 'trailers',
     });
     const chunks = [];
+    let responseBytes = 0;
 
-    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('data', (chunk) => {
+      responseBytes += chunk.length;
+      if (responseBytes > 4 * 1024 * 1024) {
+        request.close();
+        reject(new Error('Antigravity quota response exceeded 4 MiB'));
+        return;
+      }
+      chunks.push(chunk);
+    });
     request.on('error', (error) => {
       clearTimeout(timer);
       client.close();
@@ -437,19 +577,35 @@ function chooseAntigravityGroup(groups, model) {
   return groups[0];
 }
 
-// design-taste-frontend: Design Read
+function isUsableQuotaWindow(windowData) {
+  return Boolean(windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used));
+}
+
+function isUsableAntigravityData(data) {
+  return Boolean(data && (isUsableQuotaWindow(data.five) || isUsableQuotaWindow(data.seven)));
+}
+
+function readAntigravityCache() {
+  const cached = readJson(ANTIGRAVITY_CACHE);
+  if (isUsableAntigravityData(cached)) return cached;
+  if (!LEGACY_ANTIGRAVITY_CACHE) return null;
+  const legacy = readJson(LEGACY_ANTIGRAVITY_CACHE);
+  if (!isUsableAntigravityData(legacy)) return null;
+  try {
+    writeJsonAtomic(ANTIGRAVITY_CACHE, legacy);
+  } catch {}
+  return legacy;
+}
+
 function writeAntigravityCache(data) {
   try {
-    fs.mkdirSync(path.dirname(ANTIGRAVITY_CACHE), { recursive: true });
-    fs.writeFileSync(ANTIGRAVITY_CACHE, JSON.stringify(data, null, 2), 'utf8');
-  } catch (error) {
-    // Ignore write errors
-  }
+    writeJsonAtomic(ANTIGRAVITY_CACHE, data);
+  } catch {}
 }
 
 function readAntigravityFromCacheOrFallback(state, errorMessage) {
   const staleAfterMs = ANTIGRAVITY_STALE_MINUTES * 60000;
-  const cached = readJson(ANTIGRAVITY_CACHE);
+  const cached = readAntigravityCache();
   if (cached) {
     return {
       ...cached,
@@ -494,6 +650,12 @@ async function readAntigravityUsage() {
   }
   const groups = parseAntigravityQuotaPayload(payload);
   const active = chooseAntigravityGroup(groups, state.model);
+  if (!active || (!isUsableQuotaWindow(active.five) && !isUsableQuotaWindow(active.seven))) {
+    return readAntigravityFromCacheOrFallback(
+      state,
+      'Antigravity quota response did not contain usable quota buckets',
+    );
+  }
   const other = groups.find((group) => group !== active) || null;
 
   const result = {
@@ -524,7 +686,7 @@ async function getAntigravityUsage() {
 
   antigravityCache.promise = readAntigravityUsage()
     .catch((error) => {
-      const cached = readJson(ANTIGRAVITY_CACHE);
+      const cached = readAntigravityCache();
       if (cached) {
         return {
           ...cached,
@@ -554,620 +716,143 @@ async function getAntigravityUsage() {
 }
 
 function pageHtml() {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
-<meta name="theme-color" content="#0e1013">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-<title>Usage Watch</title>
-<style>
-:root {
-  --watch-w: 204px;
-  --watch-h: 136px;
-  --ink: #f5f2ea;
-  --muted: #a6a094;
-  --quiet: #6e706e;
-  --metal: #17191b;
-  --metal-2: #0e1012;
-  --rim: rgba(245, 242, 234, 0.16);
-  --track: rgba(245, 242, 234, 0.09);
-  --claude: #f2ad63;
-  --codex: #63d4c7;
-  --antigravity: #b9d86f;
-  --alert: #f06e5d;
-  --shadow: 0 22px 50px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+  return DASHBOARD_HTML;
 }
 
-* {
-  box-sizing: border-box;
-}
-
-html,
-body {
-  width: 100%;
-  min-height: 100%;
-  margin: 0;
-}
-
-body {
-  display: grid;
-  place-items: center;
-  overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 12%, rgba(242, 173, 99, 0.16), transparent 28%),
-    radial-gradient(circle at 12% 86%, rgba(99, 212, 199, 0.12), transparent 28%),
-    #0f1114;
-  color: var(--ink);
-  font-family: "Outfit", "Segoe UI", system-ui, sans-serif;
-  font-variant-numeric: tabular-nums;
-  -webkit-font-smoothing: antialiased;
-  user-select: none;
-}
-
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.22;
-  background-image:
-    linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
-  background-size: 12px 12px;
-  mask-image: radial-gradient(circle at center, black, transparent 72%);
-}
-
-.watch {
-  position: relative;
-  width: min(var(--watch-w), calc(100vw - 12px));
-  min-height: min(var(--watch-h), calc(100vh - 12px));
-  padding: 7px 9px;
-  border-radius: 28px;
-  overflow: hidden;
-  background:
-    linear-gradient(155deg, rgba(255,255,255,0.11), rgba(255,255,255,0.025) 32%, rgba(255,255,255,0.075) 100%),
-    radial-gradient(circle at 50% 0%, rgba(255,255,255,0.12), transparent 35%),
-    linear-gradient(180deg, var(--metal), var(--metal-2));
-  border: 1px solid var(--rim);
-  box-shadow: var(--shadow);
-  touch-action: none;
-  -webkit-app-region: no-drag;
-  animation: rise 260ms ease-out both;
-  opacity: 0.96;
-}
-
-.watch::after {
-  content: "";
-  position: absolute;
-  inset: 4px;
-  border-radius: 22px;
-  pointer-events: none;
-  border: 1px solid rgba(255,255,255,0.07);
-  box-shadow: inset 0 0 24px rgba(0,0,0,0.38);
-}
-
-@keyframes rise {
-  from { opacity: 0; transform: translateY(8px) scale(0.985); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-.topbar,
-.readouts,
-.status,
-button {
-  -webkit-app-region: no-drag;
-}
-
-.topbar {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  gap: 10px;
-}
-
-.title {
-  min-width: 0;
-}
-
-.title strong {
-  display: block;
-  font-size: 13px;
-  line-height: 1.1;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-
-.title span,
-.status {
-  color: var(--muted);
-  font-size: 10px;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
-.icon-btn {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border: 1px solid rgba(255,255,255,0.1);
-  border-radius: 9px;
-  background: rgba(255,255,255,0.07);
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 11px;
-  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
-}
-
-.icon-btn:hover {
-  background: rgba(255,255,255,0.12);
-  border-color: rgba(242, 173, 99, 0.38);
-}
-
-.icon-btn:active {
-  transform: translateY(1px) scale(0.97);
-}
-
-.readouts {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  margin-top: 0;
-}
-
-.readout {
-  min-width: 0;
-  min-height: 56px;
-  padding: 5px 4px;
-  border-radius: 14px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 3px;
-  background:
-    radial-gradient(circle at 50% 0%, rgba(255,255,255,0.095), transparent 58%),
-    rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.075);
-  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
-}
-
-.readout.antigravity-card {
-  grid-column: 1 / -1;
-  min-height: 58px;
-  padding-top: 2px;
-  padding-bottom: 2px;
-  display: grid;
-  grid-template-columns: minmax(72px, max-content) minmax(56px, 72px);
-  justify-content: center;
-  align-items: center;
-  column-gap: 10px;
-}
-
-.readout.antigravity-card .detail-row .metric-pair {
-  color: var(--ink);
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 15.5px;
-  line-height: 1.05;
-  font-weight: 700;
-  letter-spacing: -0.055em;
-}
-
-.readout.antigravity-card .readout-head {
-  justify-content: flex-end;
-  transform: translateX(-9px);
-}
-
-.readout.antigravity-card .detail {
-  justify-items: end;
-  transform: translateX(-5px);
-}
-
-.readout.antigravity-card .detail-row {
-  width: 100%;
-  justify-content: flex-end;
-}
-
-.readout.antigravity-card .detail-row-reset {
-  justify-content: flex-end;
-}
-
-.readout.antigravity-card .detail-value {
-  text-align: right;
-}
-
-.readout-head {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: center;
-  gap: 3px;
-  min-width: 0;
-}
-
-.service {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 8px currentColor;
-}
-
-.service-spacer {
-  visibility: hidden;
-}
-
-.readout strong {
-  color: var(--ink);
-  font-family: "JetBrains Mono", Consolas, monospace;
-  font-size: 16.5px;
-  line-height: 1.02;
-  letter-spacing: -0.055em;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.readout small {
-  color: var(--ink);
-  font-size: 12px;
-}
-
-.detail {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
-  color: var(--muted);
-  font-size: 9px;
-  line-height: 1.2;
-}
-
-.detail-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 3px;
-  min-width: 0;
-}
-
-.detail-row-primary {
-  font-size: 9px;
-  line-height: 1.18;
-  font-weight: 500;
-}
-
-.detail-value {
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  color: #cec8bc;
-  text-align: right;
-  font-weight: 600;
-}
-
-.detail-row-reset {
-  justify-content: center;
-  align-items: center;
-  gap: 4px;
-}
-
-.detail-row-reset .detail-value {
-  flex: none;
-  text-align: left;
-  font-size: 10.5px;
-  line-height: 1.05;
-}
-
-.detail-row-seven .detail-value {
-  color: #aaa498;
-}
-
-.detail-row-primary .detail-value {
-  color: var(--ink);
-}
-
-.detail-row-primary b {
-  font-size: 1.08em;
-}
-
-.claude {
-  color: var(--claude);
-}
-
-.codex {
-  color: var(--codex);
-}
-
-.antigravity {
-  color: var(--antigravity);
-}
-
-html.desktop-shell,
-body.desktop-shell {
-  background: transparent;
-}
-
-body.desktop-shell::before {
-  display: none;
-}
-
-body.desktop-shell {
-  display: block;
-}
-
-body.desktop-shell .watch {
-  width: calc(100vw - 8px);
-  min-height: calc(100vh - 8px);
-  margin: 4px;
-}
-</style>
-</head>
-<body>
-  <main class="watch" aria-label="Claude and Codex usage watch face">
-    <section class="readouts">
-      <article class="readout" aria-label="Claude usage">
-        <div class="readout-head">
-          <strong><span id="num_claude_five">--</span><small id="unit_claude_five"></small></strong>
-        </div>
-        <div class="detail">
-          <div class="detail-row detail-row-reset"><span id="reset_claude_five" class="detail-value">no data</span><span class="service claude"><i class="dot"></i></span></div>
-          <div class="detail-row detail-row-reset detail-row-seven"><span id="reset_claude_seven" class="detail-value">no data</span><span class="service claude service-spacer"><i class="dot"></i></span></div>
-        </div>
-      </article>
-
-      <article class="readout" aria-label="Codex usage">
-        <div class="readout-head">
-          <strong><span id="num_codex_five">--</span><small id="unit_codex_five"></small></strong>
-        </div>
-        <div class="detail">
-          <div class="detail-row detail-row-reset"><span id="reset_codex_five" class="detail-value">no data</span><span class="service codex"><i class="dot"></i></span></div>
-          <div class="detail-row detail-row-reset detail-row-seven"><span id="reset_codex_seven" class="detail-value">no data</span><span class="service codex service-spacer"><i class="dot"></i></span></div>
-        </div>
-      </article>
-
-      <article class="readout antigravity-card" aria-label="Antigravity quota refresh">
-        <div class="readout-head">
-          <strong><span id="num_antigravity_age">--</span><small id="unit_antigravity_age"></small></strong>
-        </div>
-        <div class="detail">
-          <div class="detail-row detail-row-primary"><span></span><span id="auth_antigravity" class="detail-value">unknown</span></div>
-          <div class="detail-row detail-row-reset"><span id="reset_antigravity_five" class="detail-value">no data</span><span class="service antigravity"><i class="dot"></i></span></div>
-          <div class="detail-row detail-row-reset detail-row-seven"><span id="reset_antigravity_seven" class="detail-value">no data</span><span class="service antigravity service-spacer"><i class="dot"></i></span></div>
-        </div>
-      </article>
-    </section>
-  </main>
-
-<script>
-const COLORS = {
-  claude: '#f2ad63',
-  codex: '#63d4c7',
-  antigravity: '#b9d86f',
-  alert: '#f06e5d',
-  muted: '#8d877c',
+const SECURITY_HEADERS = {
+  'Cache-Control': 'no-store',
+  'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'",
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+  'X-Usage-Dashboard': '1',
 };
-const ALERT_PERCENT = ${JSON.stringify(ALERT_PERCENT)};
-const params = new URLSearchParams(window.location.search);
-const isDesktopShell = params.get('mode') === 'desktop' || /\\bElectron\\//.test(navigator.userAgent);
-if (isDesktopShell) {
-  document.documentElement.classList.add('desktop-shell');
-  document.body.classList.add('desktop-shell');
-}
-const $ = (id) => document.getElementById(id);
 
-function percentValue(data) {
-  return data && typeof data.used === 'number' ? Math.round(data.used) : null;
-}
-
-// design-taste-frontend: Design Read
-function resetText(timestamp, windowMs) {
-  if (!timestamp) return 'no data';
-  let targetTime = timestamp;
-  if (windowMs && targetTime < Date.now()) {
-    const elapsed = Date.now() - targetTime;
-    const cycles = Math.floor(elapsed / windowMs) + 1;
-    targetTime = targetTime + cycles * windowMs;
+function requestHostName(hostHeader) {
+  const value = String(hostHeader || '').trim().toLowerCase();
+  if (value.startsWith('[')) {
+    const end = value.indexOf(']');
+    return end > 0 ? value.slice(1, end) : '';
   }
-  const seconds = Math.floor((targetTime - Date.now()) / 1000);
-  if (seconds <= 0) return 'reset';
-  const days = Math.floor(seconds / 86400);
-  const hours = Math.floor((seconds % 86400) / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return days + 'd ' + hours + 'h';
-  if (hours > 0) return hours + 'h ' + minutes + 'm';
-  return Math.max(0, minutes) + 'm';
+  return value.split(':')[0];
 }
 
-function ageText(timestamp) {
-  if (!timestamp) return 'no data';
-  const seconds = Math.floor((Date.now() - timestamp) / 1000);
-  if (seconds < 60) return 'now';
-  if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
-  if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
-  return Math.floor(seconds / 86400) + 'd';
-}
-
-function compactAgeParts(timestamp) {
-  if (!timestamp) return { value: '--', unit: '' };
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return { value: 'now', unit: '' };
-  if (seconds < 3600) return { value: String(Math.floor(seconds / 60)), unit: 'm' };
-  if (seconds < 86400) return { value: String(Math.floor(seconds / 3600)), unit: 'h' };
-  return { value: String(Math.floor(seconds / 86400)), unit: 'd' };
-}
-
-function shortTime(timestamp) {
-  if (!timestamp) return 'no data';
-  return new Date(timestamp).toLocaleTimeString('en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
+function writeResponse(request, response, status, contentType, body, extraHeaders = {}) {
+  response.writeHead(status, {
+    ...SECURITY_HEADERS,
+    'Content-Type': contentType,
+    ...extraHeaders,
   });
+  response.end(request.method === 'HEAD' ? undefined : body);
 }
 
-function sourceAgeText(timestamp, stale) {
-  const age = ageText(timestamp);
-  if (stale && timestamp) return 'stale ' + age;
-  return age;
-}
-
-function setText(id, value) {
-  const el = $(id);
-  if (el) el.textContent = value;
-}
-
-function setService(name, data) {
-  const five = percentValue(data && data.five);
-  const seven = percentValue(data && data.seven);
-  setText('num_' + name + '_five', five === null && seven === null ? '--' : (five === null ? '--' : String(five)) + '%/' + (seven === null ? '--' : String(seven)));
-  setText('unit_' + name + '_five', five === null && seven === null ? '' : '%');
-  setText('reset_' + name + '_five', resetText(data && data.five && data.five.resetAt, 5 * 3600000));
-  setText('reset_' + name + '_seven', resetText(data && data.seven && data.seven.resetAt, 7 * 86400000));
-  return five;
-}
-
-function setAntigravity(data) {
-  const five = percentValue(data && data.five);
-  const seven = percentValue(data && data.seven);
-  const otherFive = percentValue(data && data.other && data.other.five);
-  const otherSeven = percentValue(data && data.other && data.other.seven);
-  setText('num_antigravity_age', five === null && seven === null ? '--' : (five === null ? '--' : String(five)) + '%/' + (seven === null ? '--' : String(seven)));
-  setText('unit_antigravity_age', five === null && seven === null ? '' : '%');
-  setText('model_antigravity', data && data.activeLabel ? data.activeLabel : (data && data.model ? data.model : 'unknown'));
-  setText('reset_antigravity_five', resetText(data && data.five && data.five.resetAt, 5 * 3600000));
-  setText('reset_antigravity_seven', resetText(data && data.seven && data.seven.resetAt, 7 * 86400000));
-  const otherEl = $('auth_antigravity');
-  if (!otherEl) return;
-  if (data && data.other) {
-    otherEl.innerHTML = '';
-    const metric = document.createElement('b');
-    metric.className = 'metric-pair';
-    metric.textContent = (otherFive === null ? '--' : String(otherFive)) + '/' + (otherSeven === null ? '--' : String(otherSeven)) + '%';
-    otherEl.append(metric);
-  } else {
-    otherEl.textContent = data && data.error ? data.error : 'no data';
-  }
-}
-
-function setOffline() {
-  setService('claude', {});
-  setService('codex', {});
-  setAntigravity({});
-}
-
-function installDesktopDrag() {
-  if (!isDesktopShell || !window.desktopHud) return;
-  const watch = document.querySelector('.watch');
-  if (!watch) return;
-  let dragging = false;
-  let pointerId = null;
-
-  const stop = () => {
-    if (!dragging) return;
-    dragging = false;
-    pointerId = null;
-    window.desktopHud.endDrag();
+async function defaultUsageProvider() {
+  return {
+    config: { alertPercent: ALERT_PERCENT },
+    claude: readClaudeUsage(),
+    codex: getCodexUsage(),
+    antigravity: await getAntigravityUsage(),
   };
+}
 
-  watch.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || event.target.closest('button')) return;
-    dragging = true;
-    pointerId = event.pointerId;
-    watch.setPointerCapture(pointerId);
-    window.desktopHud.beginDrag(event.screenX, event.screenY);
-    event.preventDefault();
+function createDashboardServer(options = {}) {
+  const usageProvider = options.usageProvider || defaultUsageProvider;
+  return http.createServer(async (request, response) => {
+    try {
+      const hostName = requestHostName(request.headers.host);
+      if (!LOCAL_HOSTS.has(hostName)) {
+        writeResponse(request, response, 403, 'text/plain; charset=utf-8', 'Forbidden host');
+        return;
+      }
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        writeResponse(
+          request,
+          response,
+          405,
+          'text/plain; charset=utf-8',
+          'Method not allowed',
+          { Allow: 'GET, HEAD' },
+        );
+        return;
+      }
+
+      const requestUrl = new URL(request.url || '/', 'http://localhost');
+      if (requestUrl.pathname === '/healthz') {
+        writeResponse(
+          request,
+          response,
+          200,
+          'application/json; charset=utf-8',
+          JSON.stringify({ ok: true }),
+        );
+        return;
+      }
+      if (requestUrl.pathname === '/api/usage') {
+        writeResponse(
+          request,
+          response,
+          200,
+          'application/json; charset=utf-8',
+          JSON.stringify(await usageProvider()),
+        );
+        return;
+      }
+      if (requestUrl.pathname === '/dashboard.css') {
+        writeResponse(request, response, 200, 'text/css; charset=utf-8', DASHBOARD_CSS);
+        return;
+      }
+      if (requestUrl.pathname === '/dashboard.js') {
+        writeResponse(request, response, 200, 'text/javascript; charset=utf-8', DASHBOARD_JS);
+        return;
+      }
+      if (requestUrl.pathname === '/' && requestUrl.searchParams.get('mode') === 'desktop') {
+        writeResponse(request, response, 200, 'text/html; charset=utf-8', pageHtml());
+        return;
+      }
+
+      writeResponse(
+        request,
+        response,
+        404,
+        'text/plain; charset=utf-8',
+        requestUrl.pathname === '/'
+          ? 'Web mode has been removed. Start the desktop floating dashboard with start-dashboard-desktop.bat or npm start.'
+          : 'Not found',
+      );
+    } catch (error) {
+      console.error('[dashboard-server] request failed:', error.message);
+      if (!response.headersSent) {
+        writeResponse(request, response, 500, 'text/plain; charset=utf-8', 'Internal server error');
+      } else {
+        response.destroy();
+      }
+    }
   });
+}
 
-  watch.addEventListener('pointermove', (event) => {
-    if (!dragging || event.pointerId !== pointerId) return;
-    window.desktopHud.dragTo(event.screenX, event.screenY);
+function hostForUrl(host) {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
+if (require.main === module) {
+  const server = createDashboardServer();
+  server.listen(PORT, HOST, () => {
+    const urlHost = hostForUrl(HOST);
+    console.log('Claude / Codex usage dashboard');
+    console.log(`Desktop: http://${urlHost}:${PORT}/?mode=desktop`);
+    console.log(`API:     http://${urlHost}:${PORT}/api/usage`);
   });
-
-  watch.addEventListener('pointerup', stop);
-  watch.addEventListener('pointercancel', stop);
-  window.addEventListener('blur', stop);
 }
 
-async function refreshUsage() {
-  try {
-    const response = await fetch('/api/usage', { cache: 'no-store' });
-    const usage = await response.json();
-    setService('claude', usage.claude || {});
-    setService('codex', usage.codex || {});
-    setAntigravity(usage.antigravity || {});
-  } catch (error) {
-    setOffline();
-  }
-}
-
-function init() {
-  installDesktopDrag();
-  const refreshBtn = $('refreshBtn');
-  if (refreshBtn) refreshBtn.addEventListener('click', refreshUsage);
-  refreshUsage();
-  setInterval(refreshUsage, 2000);
-}
-
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') refreshUsage();
-});
-
-init();
-</script>
-</body>
-</html>`;
-}
-
-const server = http.createServer(async (request, response) => {
-  const requestUrl = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
-
-  if (requestUrl.pathname === '/api/usage') {
-    response.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-    });
-    response.end(JSON.stringify({
-      claude: readClaudeUsage(),
-      codex: getCodexUsage(),
-      antigravity: await getAntigravityUsage(),
-    }));
-    return;
-  }
-
-  if (requestUrl.searchParams.get('mode') !== 'desktop') {
-    response.writeHead(404, {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-store',
-    });
-    response.end('Web mode has been removed. Start the desktop floating dashboard with start-dashboard-desktop.bat or npm start.');
-    return;
-  }
-
-  response.writeHead(200, {
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store',
-  });
-  response.end(pageHtml());
-});
-
-server.listen(PORT, HOST, () => {
-  console.log('Claude / Codex usage dashboard');
-  console.log('Desktop: http://' + HOST + ':' + PORT + '/?mode=desktop');
-  console.log('API:     http://' + HOST + ':' + PORT + '/api/usage');
-});
+module.exports = {
+  createDashboardServer,
+  isUsableAntigravityData,
+  pageHtml,
+  parseAntigravityQuotaPayload,
+  parseCodexEventLine,
+  readCodexUsage,
+  readLatestCodexSnapshot,
+  requestHostName,
+  writeJsonAtomic,
+};

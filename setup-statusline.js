@@ -5,12 +5,17 @@ const path = require('path');
 const os = require('os');
 
 const useFanout = process.argv.includes('--fanout');
-const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+const settingsPath = process.env.CLAUDE_SETTINGS_PATH
+  || path.join(os.homedir(), '.claude', 'settings.json');
+const configPath = process.env.STATUSLINE_CONFIG_PATH
+  || path.join(__dirname, 'config.json');
 const scriptName = useFanout ? 'statusline-both.js' : 'statusline-usage.js';
 const scriptPath = path.join(__dirname, scriptName);
 
 function quote(value) {
-  return '"' + String(value).replace(/"/g, '\\"') + '"';
+  const text = String(value);
+  if (text.includes('"')) throw new Error('Command paths cannot contain double quotes');
+  return '"' + text + '"';
 }
 
 function backupPathFor(filePath) {
@@ -18,51 +23,128 @@ function backupPathFor(filePath) {
   return filePath + '.bak-' + stamp;
 }
 
-if (process.argv.includes('--help') || process.argv.includes('-h')) {
+function readJsonFile(filePath, fallback = {}) {
+  if (!fs.existsSync(filePath)) return fallback;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) || fallback;
+  } catch {
+    throw new Error('Failed to parse JSON: ' + filePath);
+  }
+}
+
+function backupFile(filePath) {
+  const backupPath = backupPathFor(filePath);
+  fs.copyFileSync(filePath, backupPath, fs.constants.COPYFILE_EXCL);
+  return backupPath;
+}
+
+function writeJsonAtomic(filePath, value) {
+  const directory = path.dirname(filePath);
+  const temporaryPath = path.join(
+    directory,
+    '.' + path.basename(filePath) + '.' + process.pid + '.' + Date.now() + '.tmp',
+  );
+  fs.mkdirSync(directory, { recursive: true });
+  try {
+    fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2) + '\n', 'utf8');
+    fs.renameSync(temporaryPath, filePath);
+  } catch (error) {
+    try {
+      fs.unlinkSync(temporaryPath);
+    } catch {}
+    throw error;
+  }
+}
+
+function isDashboardStatusline(command) {
+  const normalized = String(command || '').toLowerCase();
+  return normalized.includes('statusline-usage.js') || normalized.includes('statusline-both.js');
+}
+
+function printHelp() {
   console.log('Usage: node setup-statusline.js [--fanout]');
   console.log('');
-  console.log('--fanout  Use statusline-both.js so this dashboard can coexist with another statusLine command.');
-  process.exit(0);
+  console.log('--fanout  Preserve an existing statusLine command through statusline-both.js.');
 }
 
-let settings = {};
-if (fs.existsSync(settingsPath)) {
-  try {
-    settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) || {};
-  } catch (error) {
-    console.error('Failed to parse Claude settings: ' + settingsPath);
-    process.exit(1);
+function main() {
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    printHelp();
+    return;
   }
 
-  try {
-    const backupPath = backupPathFor(settingsPath);
-    fs.copyFileSync(settingsPath, backupPath);
+  const settingsExists = fs.existsSync(settingsPath);
+  const settings = readJsonFile(settingsPath);
+  const previousCommand = settings.statusLine && typeof settings.statusLine.command === 'string'
+    ? settings.statusLine.command
+    : '';
+
+  if (previousCommand && !isDashboardStatusline(previousCommand) && !useFanout) {
+    throw new Error(
+      'An existing statusLine command is configured. Re-run with --fanout to preserve it.',
+    );
+  }
+
+  if (useFanout && previousCommand && !isDashboardStatusline(previousCommand)) {
+    const configExists = fs.existsSync(configPath);
+    const config = readJsonFile(configPath);
+    if (
+      config.extraStatuslineCommand
+      && config.extraStatuslineCommand !== previousCommand
+    ) {
+      throw new Error(
+        'config.json already contains a different extraStatuslineCommand. Review it before continuing.',
+      );
+    }
+    config.extraStatuslineCommand = previousCommand;
+    if (configExists) {
+      const configBackup = backupFile(configPath);
+      console.log('Backed up existing fanout config to:');
+      console.log('  ' + configBackup);
+    }
+    writeJsonAtomic(configPath, config);
+  }
+
+  if (settingsExists) {
+    const settingsBackup = backupFile(settingsPath);
     console.log('Backed up existing settings to:');
-    console.log('  ' + backupPath);
-  } catch (error) {
-    console.warn('Warning: could not create a backup for settings.json.');
+    console.log('  ' + settingsBackup);
+  }
+
+  const command = quote(process.execPath) + ' ' + quote(scriptPath);
+  settings.statusLine = {
+    type: 'command',
+    command,
+    padding: 0,
+  };
+  writeJsonAtomic(settingsPath, settings);
+
+  console.log('');
+  console.log('Claude Code statusLine is now configured:');
+  console.log('  ' + command);
+  console.log('');
+  console.log('Next steps:');
+  console.log('  1. Restart Claude Code completely.');
+  console.log('  2. Send one message in Claude Code.');
+  console.log('  3. The dashboard will refresh automatically.');
+  if (useFanout) {
+    console.log('');
+    console.log('Fanout mode is enabled.');
   }
 }
 
-const command = quote(process.execPath) + ' ' + quote(scriptPath);
-settings.statusLine = {
-  type: 'command',
-  command,
-  padding: 0,
-};
-
-fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-
-console.log('');
-console.log('Claude Code statusLine is now configured:');
-console.log('  ' + command);
-console.log('');
-console.log('Next steps:');
-console.log('  1. Restart Claude Code completely.');
-console.log('  2. Send one message in Claude Code.');
-console.log('  3. Refresh the dashboard.');
-if (useFanout) {
-  console.log('');
-  console.log('Fanout mode is enabled. Edit config.json if you want to forward statusLine JSON to another command.');
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }
+
+module.exports = {
+  backupFile,
+  isDashboardStatusline,
+  main,
+  writeJsonAtomic,
+};
