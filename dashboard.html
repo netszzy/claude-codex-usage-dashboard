@@ -1,65 +1,62 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
   <meta name="theme-color" content="#101316">
-  <meta name="description" content="Local Claude, Codex, and Antigravity usage status">
+  <meta name="description" content="本地多 Agent 额度悬浮看板">
   <title>Usage Watch</title>
   <link rel="stylesheet" href="/dashboard.css">
   <script src="/dashboard.js" defer></script>
 </head>
 <body>
-  <main id="dashboard" class="watch" aria-label="Claude, Codex, and Antigravity usage" aria-live="polite" aria-busy="true">
+  <main id="dashboard" class="watch" aria-label="多 Agent 额度看板" aria-live="polite" aria-busy="true">
     <header class="watch-head">
-      <div>
+      <div class="watch-title">
         <strong>Usage watch</strong>
         <span>local quota monitor</span>
       </div>
-      <span id="overall_state" class="overall-state">connecting</span>
+      <div class="watch-actions" data-no-drag>
+        <span id="overall_state" class="overall-state">connecting</span>
+        <button id="settings_toggle" class="settings-toggle" type="button" aria-controls="settings_panel" aria-expanded="false">配置</button>
+      </div>
     </header>
 
-    <section class="readouts" aria-label="Usage services">
-      <article id="card_claude" class="readout" aria-labelledby="label_claude">
-        <header class="readout-head">
-          <span id="label_claude" class="service-name claude"><i class="dot" aria-hidden="true"></i>Claude</span>
-          <span id="state_claude" class="state">waiting</span>
-        </header>
-        <div class="quota-grid">
-          <div class="quota"><span class="window-label">5H</span><strong id="value_claude_five" class="quota-value">--</strong></div>
-          <div class="quota"><span class="window-label">7D</span><strong id="value_claude_seven" class="quota-value">--</strong></div>
-        </div>
-        <div class="reset-row"><span>reset</span><span id="reset_claude_five">no data</span><span id="reset_claude_seven">no data</span></div>
-      </article>
-
-      <article id="card_codex" class="readout" aria-labelledby="label_codex">
-        <header class="readout-head">
-          <span id="label_codex" class="service-name codex"><i class="dot" aria-hidden="true"></i>Codex</span>
-          <span id="state_codex" class="state">waiting</span>
-        </header>
-        <div class="quota-grid">
-          <div class="quota"><span class="window-label">5H</span><strong id="value_codex_five" class="quota-value">--</strong></div>
-          <div class="quota"><span class="window-label">7D</span><strong id="value_codex_seven" class="quota-value">--</strong></div>
-        </div>
-        <div class="reset-row"><span>reset</span><span id="reset_codex_five">no data</span><span id="reset_codex_seven">no data</span></div>
-      </article>
-
-      <article id="card_antigravity" class="readout antigravity-card" aria-labelledby="label_antigravity">
-        <header class="readout-head">
-          <span id="label_antigravity" class="service-name antigravity"><i class="dot" aria-hidden="true"></i>Antigravity</span>
-          <span id="state_antigravity" class="state">waiting</span>
-        </header>
-        <div class="group-row">
-          <span id="label_antigravity_primary" class="group-label">active group</span>
-          <span class="metric-pair"><span class="window-label">5H</span><strong id="value_antigravity_five" class="quota-value">--</strong><span class="window-label">7D</span><strong id="value_antigravity_seven" class="quota-value">--</strong></span>
-        </div>
-        <div id="antigravity_other" class="group-row" hidden>
-          <span id="label_antigravity_other" class="group-label">other group</span>
-          <span class="metric-pair"><span class="window-label">5H</span><strong id="value_antigravity_other_five" class="quota-value">--</strong><span class="window-label">7D</span><strong id="value_antigravity_other_seven" class="quota-value">--</strong></span>
-        </div>
-        <div class="reset-row"><span>reset</span><span id="reset_antigravity_five">no data</span><span id="reset_antigravity_seven">no data</span></div>
-      </article>
+    <section id="readouts" class="readouts" aria-label="Agent 额度"></section>
+    <section id="empty_state" class="empty-state" hidden>
+      <strong>尚未选择 Agent</strong>
+      <span>打开配置，选择需要显示的额度。</span>
+      <button id="empty_settings" type="button" data-no-drag>打开配置</button>
     </section>
+
+    <aside id="settings_panel" class="settings-panel" hidden aria-labelledby="settings_title" data-no-drag>
+      <header class="settings-head">
+        <div>
+          <strong id="settings_title">看板配置</strong>
+          <span>选择 Agent 与显示密度</span>
+        </div>
+        <button id="settings_close" class="icon-button" type="button" aria-label="关闭配置">&times;</button>
+      </header>
+
+      <fieldset class="settings-group">
+        <legend>显示的 Agent</legend>
+        <div id="agent_choices" class="agent-choices"></div>
+      </fieldset>
+
+      <fieldset class="settings-group">
+        <legend>卡片样式</legend>
+        <div class="density-choices">
+          <label><input type="radio" name="density" value="auto">自适应</label>
+          <label><input type="radio" name="density" value="compact">紧凑</label>
+          <label><input type="radio" name="density" value="comfortable">舒展</label>
+        </div>
+      </fieldset>
+
+      <footer class="settings-foot">
+        <span>设置仅保存在本机</span>
+        <button id="settings_reset" class="text-button" type="button">恢复默认</button>
+      </footer>
+    </aside>
   </main>
 </body>
 </html>

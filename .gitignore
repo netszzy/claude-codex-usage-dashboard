@@ -16,6 +16,9 @@ Thumbs.db
 .vscode/
 .idea/
 .codegraph/
+.workbuddy/
+*.db-shm
+*.db-wal
 
 usage-cache.json
 streamdeck-usage.json

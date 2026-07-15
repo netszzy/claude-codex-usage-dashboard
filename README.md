@@ -1,12 +1,15 @@
 # Claude / Codex Usage Dashboard
 
-一个非官方的 Windows 本地悬浮面板，用于查看 Claude Code、Codex 和 Antigravity 的配额使用情况。
+一个非官方的 Windows 本地悬浮面板，用于查看多个 AI Agent 的配额使用情况。
 
 面板只读取本机缓存与日志，内部 HTTP 服务严格绑定 loopback，不加载远程字体、脚本或图片。
 
 ## 功能
 
-- 显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
+- 自动显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
+- 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展三种卡片样式间切换。
+- 悬浮窗按已选 Agent 数量自动调整为 1～3 列并同步改变窗口尺寸。
+- 通过本地额度快照桥接 Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
 - 明确显示服务名、5H/7D 含义、数据年龄以及 LIVE、STALE、OFFLINE 状态。
 - 数据过期后不再把历史重置时间推算成新的未来周期。
 - Codex 日志按修改时间排序，并从文件尾部反向分块读取最新 rate_limits，避免周期性全量扫描。
@@ -23,6 +26,7 @@
 - Claude 数据来自 Claude Code statusLine 缓存。网页或 Claude 桌面客户端不会刷新该缓存。
 - Codex 数据来自 ~/.codex/sessions 中最新的 rate_limits 事件。
 - Antigravity 数据来自本机 Antigravity CLI gRPC 服务；连接失败时保留最后有效值并标记为 stale/offline。
+- Gemini CLI、GitHub Copilot、Cursor、OpenCode 等扩展项来自统一的本地快照目录；看板不会读取这些工具的登录凭据，也不会代替它们访问远程服务。
 
 本项目与 Anthropic、OpenAI 或 Google 无隶属关系，也不包含其官方 Logo。
 
@@ -52,6 +56,63 @@ npm start
 也可以双击 start-dashboard-desktop.bat。
 
 Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现有窗口，不会创建第二套进程。
+
+## 配置看板
+
+点击悬浮窗右上角的“配置”：
+
+1. 勾选需要显示的 Agent；未连接的预设会标记为“等待快照”。
+2. 选择“自适应”“紧凑”或“舒展”卡片样式。
+3. 设置会写入 Electron 页面自己的本地存储，不修改 Agent 配置或凭据。
+
+“恢复默认”只恢复 Claude Code、Codex、Antigravity 三个自动采集项和自适应样式。
+
+## 更多 Agent 额度桥接
+
+扩展 Agent 的默认快照目录是：
+
+~~~text
+%USERPROFILE%\.claude-codex-usage-dashboard\agents
+~~~
+
+内置文件名为 `gemini.json`、`github-copilot.json`、`cursor.json`、`opencode.json`。目录中其他符合 `[a-z0-9][a-z0-9_-]{0,31}.json` 的文件会自动成为自定义 Agent；最多读取 32 个文件，单文件最大 256 KiB。额度百分比统一使用 `0～100`，时间可使用 Unix 毫秒或 ISO 8601。
+
+最小快照示例：
+
+~~~json
+{
+  "label": "Gemini CLI",
+  "fetchedAt": "2026-07-14T10:00:00Z",
+  "staleAfterMs": 7200000,
+  "windows": [
+    { "id": "daily", "label": "DAY", "used": 37.4, "resetAt": "2026-07-15T00:00:00Z" },
+    { "id": "pro", "label": "PRO", "used": 12.8, "resetAt": "2026-07-14T12:00:00Z" }
+  ]
+}
+~~~
+
+支持同一 Agent 的多模型/多组额度：
+
+~~~json
+{
+  "label": "My Agent",
+  "fetchedAt": 1784023200000,
+  "groups": [
+    {
+      "id": "fast",
+      "label": "Fast models",
+      "windows": [{ "id": "daily", "label": "DAY", "used": 42 }]
+    },
+    {
+      "id": "reasoning",
+      "label": "Reasoning",
+      "windows": [{ "id": "weekly", "label": "7D", "used": 18 }]
+    }
+  ]
+}
+~~~
+
+快照只接收白名单字段：`label`、`accent`、`source`、`fetchedAt`、`staleAfterMs`、`stale`、`error`、`windows`、`groups`。凭据、提示词等其他字段不会进入 API。让对应 Agent 的官方命令或你自己的本地脚本更新该文件即可；看板每 5 秒重新读取。
 
 ## Claude statusLine 配置
 
@@ -113,6 +174,8 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | ANTIGRAVITY_LOG_DIR | ~/.gemini/antigravity-cli/log | Antigravity 日志目录 |
 | ANTIGRAVITY_SETTINGS | ~/.gemini/antigravity-cli/settings.json | Antigravity 设置路径 |
 | ANTIGRAVITY_USAGE_CACHE | ~/.claude-codex-usage-dashboard/antigravity-usage-cache.json | Antigravity last-good 缓存 |
+| AGENT_USAGE_DIR | ~/.claude-codex-usage-dashboard/agents | 扩展 Agent 的本地额度快照目录 |
+| EXTERNAL_AGENT_STALE_MINUTES | 120 | 扩展 Agent 默认过期阈值 |
 | EXTRA_STATUSLINE_COMMAND | 空 | fanout 的额外命令，优先于 config.json |
 
 示例：
@@ -125,7 +188,7 @@ npm start
 ## 本地 API
 
 - GET /healthz：轻量健康检查，不读取日志。
-- GET /api/usage：返回三类配额和 config.alertPercent。
+- GET /api/usage：返回标准化的 `agents` 列表、`config.agents` 目录和 `config.alertPercent`；同时保留原有 `claude`、`codex`、`antigravity` 字段兼容旧客户端。
 - GET /?mode=desktop：HUD 页面。
 
 其他 Host、方法和路径会返回 403、405 或 404。
@@ -144,7 +207,7 @@ npm run check 会检查所有 JavaScript 文件语法并运行测试。
 
 - 页面不加载任何远程资源。
 - 服务只监听本机 loopback。
-- API 只返回配额摘要、状态和模型/分组标签，不返回会话正文。
+- API 只返回配额摘要、状态和模型/分组标签，不返回会话正文或扩展快照中的非白名单字段。
 - Antigravity gRPC 请求只发往 127.0.0.1。
 - 项目不会上传本地缓存或日志。
 

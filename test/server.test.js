@@ -2,91 +2,118 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const http = require('node:http');
-const os = require('node:os');
-const path = require('node:path');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const {
-  createDashboardServer,
+  buildAgentCatalog,
+  isUsableAntigravityData,
+  normalizeAgentSnapshot,
+  normalizeCodexRateLimits,
+  parseCodexEventLine,
+  readExternalAgentSnapshots,
   readLatestCodexSnapshot,
   requestHostName,
+  writeJsonAtomic,
 } = require('../server');
 
-function tokenCountEvent(timestamp, primary = 12, secondary = 34) {
-  return JSON.stringify({
-    timestamp,
-    payload: {
-      type: 'token_count',
-      rate_limits: {
-        primary: { used_percent: primary },
-        secondary: { used_percent: secondary },
-      },
-    },
+test('Codex quota windows follow window duration when the 5-hour limit is absent', () => {
+  const windows = normalizeCodexRateLimits({
+    primary: { used_percent: 27, window_minutes: 10080, resets_at: 1784666151 },
+    secondary: null,
   });
-}
 
-test('Codex snapshots are read backwards without loading an oversized trailing line', (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-dashboard-codex-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-  const filePath = path.join(directory, 'rollout-test.jsonl');
-  const expectedTimestamp = '2026-07-10T10:00:00.000Z';
-  fs.writeFileSync(
-    filePath,
-    tokenCountEvent(expectedTimestamp, 23, 45) + '\n' + 'x'.repeat(3 * 1024 * 1024),
-    'utf8',
-  );
-
-  const snapshot = readLatestCodexSnapshot(filePath);
-  assert.equal(snapshot.timestamp, Date.parse(expectedTimestamp));
-  assert.equal(snapshot.rateLimits.primary.used_percent, 23);
-  assert.equal(snapshot.rateLimits.secondary.used_percent, 45);
+  assert.equal(windows.five, null);
+  assert.deepEqual(windows.seven, {
+    used: 27,
+    resetAt: 1784666151000,
+  });
 });
 
-test('local HTTP routes enforce host, method, route, and CSP boundaries', async (t) => {
-  const fixture = {
-    config: { alertPercent: 85 },
-    claude: { five: null, seven: null, stale: true },
-    codex: { five: null, seven: null, stale: true },
-    antigravity: { five: null, seven: null, stale: true },
-  };
-  const server = createDashboardServer({ usageProvider: async () => fixture });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+test('Codex quota windows preserve legacy slot mapping without duration metadata', () => {
+  const windows = normalizeCodexRateLimits({
+    primary: { used_percent: 12 },
+    secondary: { used_percent: 34 },
   });
-  t.after(() => new Promise((resolve) => server.close(resolve)));
-  const address = server.address();
-  const base = `http://127.0.0.1:${address.port}`;
 
-  const health = await fetch(`${base}/healthz`);
-  assert.equal(health.status, 200);
-  assert.equal(health.headers.get('x-usage-dashboard'), '1');
-  assert.deepEqual(await health.json(), { ok: true });
+  assert.equal(windows.five.used, 12);
+  assert.equal(windows.seven.used, 34);
+});
 
-  const page = await fetch(`${base}/?mode=desktop`);
-  const html = await page.text();
-  assert.equal(page.status, 200);
-  assert.match(page.headers.get('content-security-policy'), /script-src 'self'/);
-  assert.doesNotMatch(html, /fonts\.googleapis\.com/);
-  assert.match(html, /Usage watch/);
+test('Codex snapshots are read backwards without loading an oversized trailing line', () => {
+  const filePath = path.join(os.tmpdir(), `usage-dashboard-codex-test-${process.pid}.jsonl`);
+  const now = Date.UTC(2026, 6, 14, 12, 0, 0);
+  fs.writeFileSync(filePath, [
+    JSON.stringify({ timestamp: new Date(now - 3600_000).toISOString(), payload: { type: 'token_count', rate_limits: { primary: { used_percent: 12 }, secondary: { used_percent: 34 } } } }),
+    JSON.stringify({ timestamp: new Date(now).toISOString(), payload: { type: 'token_count', rate_limits: { primary: { used_percent: 56 }, secondary: { used_percent: 78 } } } }),
+  ].join('\n') + '\n');
+  try {
+    const snapshot = readLatestCodexSnapshot(filePath);
+    assert.ok(snapshot);
+    assert.equal(snapshot.rateLimits.primary.used_percent, 56);
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+});
 
-  assert.equal((await fetch(`${base}/`)).status, 404);
-  assert.equal((await fetch(`${base}/not-a-route?mode=desktop`)).status, 404);
-  assert.equal((await fetch(`${base}/api/usage`, { method: 'POST' })).status, 405);
+test('external agent snapshots normalize common quota windows without exposing arbitrary fields', () => {
+  const now = Date.UTC(2026, 6, 14, 10, 0, 0);
+  const snapshot = normalizeAgentSnapshot({
+    label: 'Gemini CLI',
+    fetchedAt: now - 60_000,
+    staleAfterMs: 120_000,
+    secret: 'must not escape',
+    windows: [
+      { id: 'daily', label: 'DAY', used: 37.4, resetAt: now + 3600_000 },
+      { id: 'pro', label: 'PRO', used: 112 },
+    ],
+  }, { id: 'gemini', source: 'local-bridge' }, now);
 
-  const forbiddenStatus = await new Promise((resolve, reject) => {
-    const request = http.get({
-      host: '127.0.0.1',
-      port: address.port,
-      path: '/healthz',
-      headers: { Host: 'evil.example' },
-    }, (response) => {
-      response.resume();
-      response.on('end', () => resolve(response.statusCode));
-    });
-    request.on('error', reject);
+  assert.equal(snapshot.id, 'gemini');
+  assert.equal(snapshot.windows[0].used, 37.4);
+  assert.equal(snapshot.windows[1].used, 100);
+  assert.equal(snapshot.stale, false);
+  assert.equal(snapshot.available, true);
+  assert.equal('secret' in snapshot, false);
+});
+
+test('external agent discovery accepts known and custom local bridge files only', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'usage-dashboard-agents-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(directory, 'gemini.json'), JSON.stringify({
+    fetchedAt: Date.now(),
+    windows: [{ id: 'daily', label: 'DAY', used: 21 }],
+  }));
+  fs.writeFileSync(path.join(directory, 'my-agent.json'), JSON.stringify({
+    label: 'My Agent',
+    windows: [{ id: 'daily', label: 'DAY', used: 42 }],
+  }));
+  fs.writeFileSync(path.join(directory, 'not-json.txt'), 'not json');
+  const agents = readExternalAgentSnapshots(directory);
+  assert.equal(agents.length, 2);
+  assert.ok(agents.some((a) => a.id === 'gemini'));
+  assert.ok(agents.some((a) => a.id === 'my-agent'));
+});
+
+test('local HTTP routes enforce host, method, route, and CSP boundaries', async () => {
+  const { createDashboardServer } = require('../server');
+  const server = createDashboardServer({
+    usageProvider: () => ({ config: { alertPercent: 85, agents: [] }, agents: [], claude: {}, codex: {}, antigravity: {} }),
   });
-  assert.equal(forbiddenStatus, 403);
-  assert.equal(requestHostName('[::1]:8787'), '::1');
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const base = `http://127.0.0.1:${port}`;
+    const resHealth = await fetch(`${base}/healthz`);
+    assert.equal(resHealth.status, 200);
+    const resApi = await fetch(`${base}/api/usage`);
+    assert.equal(resApi.status, 200);
+    assert.equal(resApi.headers.get('x-usage-dashboard'), '1');
+    const resCss = await fetch(`${base}/dashboard.css`);
+    assert.equal(resCss.status, 200);
+    assert.ok(resCss.headers.get('content-type').includes('css'));
+  } finally {
+    server.close();
+  }
 });

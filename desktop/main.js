@@ -301,6 +301,24 @@ function bindDragIpc() {
     dragState = null;
   });
 
+  ipcMain.on('hud-resize', (event, size) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || mainWindow.isDestroyed() || !size) return;
+    const width = Math.round(Number(size.width));
+    const height = Math.round(Number(size.height));
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return;
+    if (width < 280 || width > 640 || height < 120 || height > 640) return;
+    const current = mainWindow.getBounds();
+    if (current.width === width && current.height === height) return;
+    const bounds = clampToScreen({
+      x: current.x + current.width - width,
+      y: current.y,
+      width,
+      height,
+    });
+    mainWindow.setBounds(bounds);
+    saveWindowState(bounds);
+  });
+
   ipcMain.on('hud-retry', async (event) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || mainWindow.isDestroyed()) return;
     const ready = await ensureServer();

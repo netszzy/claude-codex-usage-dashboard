@@ -34,8 +34,11 @@ const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14, { integer: true
 const CLAUDE_STALE_MINUTES = envNumber('CLAUDE_STALE_MINUTES', 10, { min: 0 });
 const CODEX_STALE_MINUTES = envNumber('CODEX_STALE_MINUTES', 120, { min: 0 });
 const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120, { min: 0 });
+const EXTERNAL_AGENT_STALE_MINUTES = envNumber('EXTERNAL_AGENT_STALE_MINUTES', 120, { min: 0 });
 const CODEX_SCAN_CHUNK_BYTES = 256 * 1024;
 const CODEX_MAX_LINE_BYTES = 2 * 1024 * 1024;
+const MAX_EXTERNAL_AGENTS = 32;
+const MAX_EXTERNAL_AGENT_BYTES = 256 * 1024;
 
 const CLAUDE_CACHE = process.env.CLAUDE_USAGE_CACHE
   || path.join(os.homedir(), '.claude', 'usage-cache.json');
@@ -50,9 +53,21 @@ const ANTIGRAVITY_CACHE = process.env.ANTIGRAVITY_USAGE_CACHE
 const LEGACY_ANTIGRAVITY_CACHE = process.env.ANTIGRAVITY_USAGE_CACHE
   ? null
   : path.join(path.dirname(CLAUDE_CACHE), 'antigravity-usage-cache.json');
+const EXTERNAL_AGENT_USAGE_DIR = process.env.AGENT_USAGE_DIR
+  || path.join(os.homedir(), '.claude-codex-usage-dashboard', 'agents');
 const DASHBOARD_HTML = fs.readFileSync(path.join(__dirname, 'dashboard.html'), 'utf8');
 const DASHBOARD_CSS = fs.readFileSync(path.join(__dirname, 'dashboard.css'), 'utf8');
 const DASHBOARD_JS = fs.readFileSync(path.join(__dirname, 'dashboard.js'), 'utf8');
+
+const AGENT_PRESETS = Object.freeze([
+  { id: 'claude', label: 'Claude Code', accent: '#d99a5d', defaultVisible: true, source: 'statusline-cache' },
+  { id: 'codex', label: 'Codex', accent: '#67bdb4', defaultVisible: true, source: 'codex-sessions' },
+  { id: 'antigravity', label: 'Antigravity', accent: '#9fbd69', defaultVisible: true, source: 'antigravity-grpc' },
+  { id: 'gemini', label: 'Gemini CLI', accent: '#79a9d8', defaultVisible: false, source: 'local-bridge' },
+  { id: 'github-copilot', label: 'GitHub Copilot', accent: '#b49ad8', defaultVisible: false, source: 'local-bridge' },
+  { id: 'cursor', label: 'Cursor', accent: '#c5b98b', defaultVisible: false, source: 'local-bridge' },
+  { id: 'opencode', label: 'OpenCode', accent: '#82b692', defaultVisible: false, source: 'local-bridge' },
+]);
 
 function readJson(filePath) {
   try {
@@ -93,6 +108,21 @@ function normalizeCodexWindow(windowData) {
   return {
     used: windowData.used_percent,
     resetAt: windowData.resets_at ? windowData.resets_at * 1000 : null,
+  };
+}
+
+function normalizeCodexRateLimits(rateLimits) {
+  if (!rateLimits || typeof rateLimits !== 'object') return { five: null, seven: null };
+
+  const windows = [rateLimits.primary, rateLimits.secondary].filter(Boolean);
+  const fiveHour = windows.find((windowData) => windowData.window_minutes === 300)
+    || (!rateLimits.primary || rateLimits.primary.window_minutes == null ? rateLimits.primary : null);
+  const sevenDay = windows.find((windowData) => windowData.window_minutes === 10080)
+    || (!rateLimits.secondary || rateLimits.secondary.window_minutes == null ? rateLimits.secondary : null);
+
+  return {
+    five: normalizeCodexWindow(fiveHour),
+    seven: normalizeCodexWindow(sevenDay),
   };
 }
 
@@ -257,11 +287,12 @@ function readCodexUsage() {
 
   const staleAfterMs = CODEX_STALE_MINUTES * 60000;
   const stale = Date.now() - newest.timestamp > staleAfterMs;
+  const windows = normalizeCodexRateLimits(newest.rateLimits);
 
   return {
     fetchedAt: newest.timestamp,
-    five: normalizeCodexWindow(newest.rateLimits.primary),
-    seven: normalizeCodexWindow(newest.rateLimits.secondary),
+    five: windows.five,
+    seven: windows.seven,
     source: 'codex-sessions',
     stale,
     staleAfterMs,
@@ -747,12 +778,181 @@ function writeResponse(request, response, status, contentType, body, extraHeader
   response.end(request.method === 'HEAD' ? undefined : body);
 }
 
-async function defaultUsageProvider() {
+function cleanAgentText(value, fallback, maxLength = 48) {
+  return typeof value === 'string' && value.trim()
+    ? value.trim().slice(0, maxLength)
+    : fallback;
+}
+
+function safeAgentId(value) {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(value)
+    ? value
+    : null;
+}
+
+function timestampValue(value) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizeAgentWindow(raw, index = 0) {
+  if (!raw || typeof raw !== 'object') return null;
+  const used = typeof raw.used === 'number' && Number.isFinite(raw.used)
+    ? Math.min(100, Math.max(0, raw.used))
+    : null;
+  const id = safeAgentId(raw.id) || `window-${index + 1}`;
   return {
-    config: { alertPercent: ALERT_PERCENT },
-    claude: readClaudeUsage(),
-    codex: getCodexUsage(),
-    antigravity: await getAntigravityUsage(),
+    id,
+    label: cleanAgentText(raw.label, id.toUpperCase(), 12),
+    used,
+    resetAt: timestampValue(raw.resetAt),
+  };
+}
+
+function quotaWindows(raw) {
+  if (!raw || typeof raw !== 'object') return [];
+  if (Array.isArray(raw.windows)) {
+    return raw.windows.slice(0, 4).map(normalizeAgentWindow).filter(Boolean);
+  }
+  return [
+    normalizeAgentWindow({ ...(raw.five || {}), id: 'five', label: '5H' }, 0),
+    normalizeAgentWindow({ ...(raw.seven || {}), id: 'seven', label: '7D' }, 1),
+  ];
+}
+
+function normalizeAgentGroups(raw) {
+  if (!raw || !Array.isArray(raw.groups)) return [];
+  return raw.groups.slice(0, 4).map((group, index) => {
+    if (!group || typeof group !== 'object') return null;
+    return {
+      id: safeAgentId(group.id) || `group-${index + 1}`,
+      label: cleanAgentText(group.label, `Group ${index + 1}`, 36),
+      windows: quotaWindows(group),
+    };
+  }).filter(Boolean);
+}
+
+function hasQuotaData(agent) {
+  return agent.windows.some((windowData) => windowData.used !== null)
+    || agent.groups.some((group) => group.windows.some((windowData) => windowData.used !== null));
+}
+
+function normalizeAgentSnapshot(raw, metadata = {}, now = Date.now()) {
+  const id = safeAgentId(metadata.id || (raw && raw.id));
+  if (!id) return null;
+  const defaultStaleAfterMs = EXTERNAL_AGENT_STALE_MINUTES * 60000;
+  const staleAfterMs = raw && typeof raw.staleAfterMs === 'number'
+    && Number.isFinite(raw.staleAfterMs) && raw.staleAfterMs >= 0
+    ? Math.min(raw.staleAfterMs, 30 * 86400000)
+    : defaultStaleAfterMs;
+  const fetchedAt = timestampValue(raw && raw.fetchedAt);
+  const accent = cleanAgentText(raw && raw.accent, metadata.accent || '#8ca0b3', 16);
+  const agent = {
+    id,
+    label: cleanAgentText(raw && raw.label, metadata.label || id, 40),
+    accent: /^#[0-9a-f]{6}$/i.test(accent) ? accent : metadata.accent || '#8ca0b3',
+    source: cleanAgentText(raw && raw.source, metadata.source || 'local-bridge', 40),
+    defaultVisible: metadata.defaultVisible === true,
+    fetchedAt,
+    stale: Boolean(raw && raw.stale) || !fetchedAt || now - fetchedAt > staleAfterMs,
+    staleAfterMs,
+    error: raw && raw.error ? cleanAgentText(raw.error, '', 160) : null,
+    windows: quotaWindows(raw),
+    groups: normalizeAgentGroups(raw),
+  };
+  agent.available = hasQuotaData(agent);
+  return agent;
+}
+
+function builtinAgentSnapshot(metadata, data) {
+  const groups = metadata.id === 'antigravity' && data && Array.isArray(data.groups)
+    ? data.groups.map((group, index) => ({
+      id: `group-${index + 1}`,
+      label: group.label,
+      five: group.five,
+      seven: group.seven,
+    }))
+    : [];
+  return normalizeAgentSnapshot({ ...data, groups }, metadata);
+}
+
+function readExternalAgentSnapshots(directory = EXTERNAL_AGENT_USAGE_DIR) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .slice(0, MAX_EXTERNAL_AGENTS);
+  } catch {
+    return [];
+  }
+
+  const presets = new Map(AGENT_PRESETS.map((preset) => [preset.id, preset]));
+  return entries.map((entry) => {
+    const id = safeAgentId(entry.name.slice(0, -5));
+    if (!id || id === 'claude' || id === 'codex' || id === 'antigravity') return null;
+    const filePath = path.join(directory, entry.name);
+    try {
+      if (fs.statSync(filePath).size > MAX_EXTERNAL_AGENT_BYTES) return null;
+    } catch {
+      return null;
+    }
+    const raw = readJson(filePath);
+    if (!raw || typeof raw !== 'object') return null;
+    return normalizeAgentSnapshot(raw, presets.get(id) || { id });
+  }).filter(Boolean);
+}
+
+function buildAgentCatalog(agents) {
+  const byId = new Map(agents.map((agent) => [agent.id, agent]));
+  const catalog = AGENT_PRESETS.map((preset) => {
+    const agent = byId.get(preset.id);
+    return {
+      id: preset.id,
+      label: preset.label,
+      accent: preset.accent,
+      defaultVisible: preset.defaultVisible,
+      available: Boolean(agent && agent.available),
+      source: agent ? agent.source : preset.source,
+      bridgeFile: preset.source === 'local-bridge' ? `${preset.id}.json` : null,
+    };
+  });
+  const knownIds = new Set(catalog.map((agent) => agent.id));
+  for (const agent of agents) {
+    if (knownIds.has(agent.id)) continue;
+    catalog.push({
+      id: agent.id,
+      label: agent.label,
+      accent: agent.accent,
+      defaultVisible: false,
+      available: agent.available,
+      source: agent.source,
+      bridgeFile: `${agent.id}.json`,
+    });
+  }
+  return catalog;
+}
+
+async function defaultUsageProvider() {
+  const claude = readClaudeUsage();
+  const codex = getCodexUsage();
+  const antigravity = await getAntigravityUsage();
+  const coreData = { claude, codex, antigravity };
+  const agents = AGENT_PRESETS.slice(0, 3).map((preset) => (
+    builtinAgentSnapshot(preset, coreData[preset.id])
+  ));
+  agents.push(...readExternalAgentSnapshots());
+  return {
+    config: {
+      alertPercent: ALERT_PERCENT,
+      agents: buildAgentCatalog(agents),
+    },
+    agents,
+    claude,
+    codex,
+    antigravity,
   };
 }
 
@@ -846,12 +1046,16 @@ if (require.main === module) {
 }
 
 module.exports = {
+  buildAgentCatalog,
   createDashboardServer,
   isUsableAntigravityData,
+  normalizeAgentSnapshot,
+  normalizeCodexRateLimits,
   pageHtml,
   parseAntigravityQuotaPayload,
   parseCodexEventLine,
   readCodexUsage,
+  readExternalAgentSnapshots,
   readLatestCodexSnapshot,
   requestHostName,
   writeJsonAtomic,
