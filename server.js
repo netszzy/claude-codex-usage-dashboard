@@ -5,6 +5,7 @@ const http2 = require('http2');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawn } = require('child_process');
 
 const HOST = process.env.HOST || '127.0.0.1';
 const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
@@ -33,12 +34,30 @@ const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85, { min: 0, max: 100 });
 const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14, { integer: true, min: 1, max: 365 });
 const CLAUDE_STALE_MINUTES = envNumber('CLAUDE_STALE_MINUTES', 10, { min: 0 });
 const CODEX_STALE_MINUTES = envNumber('CODEX_STALE_MINUTES', 120, { min: 0 });
+const CODEX_RATE_LIMIT_REFRESH_SECONDS = envNumber('CODEX_RATE_LIMIT_REFRESH_SECONDS', 60, {
+  integer: true,
+  min: 15,
+  max: 3600,
+});
+const CODEX_APP_SERVER_TIMEOUT_SECONDS = envNumber('CODEX_APP_SERVER_TIMEOUT_SECONDS', 15, {
+  integer: true,
+  min: 3,
+  max: 60,
+});
 const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120, { min: 0 });
 const EXTERNAL_AGENT_STALE_MINUTES = envNumber('EXTERNAL_AGENT_STALE_MINUTES', 120, { min: 0 });
 const CODEX_SCAN_CHUNK_BYTES = 256 * 1024;
 const CODEX_MAX_LINE_BYTES = 2 * 1024 * 1024;
+const CODEX_SESSION_CACHE_MS = 8000;
+const CODEX_RATE_LIMIT_REFRESH_MS = CODEX_RATE_LIMIT_REFRESH_SECONDS * 1000;
+const CODEX_APP_SERVER_TIMEOUT_MS = CODEX_APP_SERVER_TIMEOUT_SECONDS * 1000;
+const CODEX_RATE_LIMITS_SOURCE = String(process.env.CODEX_RATE_LIMITS_SOURCE || 'auto').trim().toLowerCase();
 const MAX_EXTERNAL_AGENTS = 32;
 const MAX_EXTERNAL_AGENT_BYTES = 256 * 1024;
+
+if (!new Set(['auto', 'sessions']).has(CODEX_RATE_LIMITS_SOURCE)) {
+  throw new Error('CODEX_RATE_LIMITS_SOURCE must be auto or sessions');
+}
 
 const CLAUDE_CACHE = process.env.CLAUDE_USAGE_CACHE
   || path.join(os.homedir(), '.claude', 'usage-cache.json');
@@ -124,6 +143,178 @@ function normalizeCodexRateLimits(rateLimits) {
     five: normalizeCodexWindow(fiveHour),
     seven: normalizeCodexWindow(sevenDay),
   };
+}
+
+function normalizeCodexAppServerRateLimits(result, now = Date.now()) {
+  if (!result || typeof result !== 'object') return null;
+  const byLimitId = result.rateLimitsByLimitId;
+  const rateLimits = byLimitId && byLimitId.codex ? byLimitId.codex : result.rateLimits;
+  if (!rateLimits || typeof rateLimits !== 'object') return null;
+
+  const adaptWindow = (windowData) => {
+    if (!windowData || typeof windowData.usedPercent !== 'number') return null;
+    return {
+      used_percent: windowData.usedPercent,
+      resets_at: windowData.resetsAt,
+      window_minutes: windowData.windowDurationMins,
+    };
+  };
+  const windows = normalizeCodexRateLimits({
+    primary: adaptWindow(rateLimits.primary),
+    secondary: adaptWindow(rateLimits.secondary),
+  });
+  if (!windows.five && !windows.seven) return null;
+
+  return {
+    fetchedAt: now,
+    five: windows.five,
+    seven: windows.seven,
+    source: 'codex-app-server',
+    stale: false,
+    staleAfterMs: Math.max(CODEX_RATE_LIMIT_REFRESH_MS * 3, 120000),
+  };
+}
+
+function resolveCodexExecutable(env = process.env, platform = process.platform) {
+  if (env.CODEX_EXECUTABLE) return env.CODEX_EXECUTABLE;
+  if (platform !== 'win32' || !env.LOCALAPPDATA) return 'codex';
+
+  const binDir = path.join(env.LOCALAPPDATA, 'OpenAI', 'Codex', 'bin');
+  let entries = [];
+  try {
+    entries = fs.readdirSync(binDir, { withFileTypes: true });
+  } catch {
+    return 'codex';
+  }
+
+  const candidates = [];
+  for (const entry of entries) {
+    const candidate = entry.isDirectory()
+      ? path.join(binDir, entry.name, 'codex.exe')
+      : entry.name.toLowerCase() === 'codex.exe' ? path.join(binDir, entry.name) : null;
+    if (!candidate) continue;
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isFile()) candidates.push({ candidate, mtimeMs: stat.mtimeMs });
+    } catch {}
+  }
+  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
+  return candidates.length ? candidates[0].candidate : 'codex';
+}
+
+function queryCodexAppServerRateLimits(options = {}) {
+  const spawnImpl = options.spawnImpl || spawn;
+  const executable = options.executable || resolveCodexExecutable();
+  const timeoutMs = options.timeoutMs || CODEX_APP_SERVER_TIMEOUT_MS;
+  const now = options.now || Date.now;
+
+  return new Promise((resolve, reject) => {
+    let child = null;
+    let settled = false;
+    let timer = null;
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+
+    const finish = (error, data) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try { child.stdin.end(); } catch {}
+      try { child.kill(); } catch {}
+      if (error) reject(error);
+      else resolve(data);
+    };
+
+    const failure = (message) => {
+      const detail = stderrBuffer.trim().slice(-500);
+      return new Error(detail ? `${message}: ${detail}` : message);
+    };
+
+    const send = (message) => {
+      try {
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+      } catch (error) {
+        finish(error);
+      }
+    };
+
+    const handleLine = (line) => {
+      let message = null;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (message.id === 1) {
+        if (message.error) {
+          finish(failure(`Codex app-server initialize failed: ${JSON.stringify(message.error)}`));
+          return;
+        }
+        send({ method: 'initialized' });
+        send({ id: 2, method: 'account/rateLimits/read', params: null });
+        return;
+      }
+      if (message.id !== 2) return;
+      if (message.error) {
+        finish(failure(`Codex rate-limit request failed: ${JSON.stringify(message.error)}`));
+        return;
+      }
+      const normalized = normalizeCodexAppServerRateLimits(message.result, now());
+      if (!normalized) {
+        finish(failure('Codex rate-limit response contained no usable windows'));
+        return;
+      }
+      finish(null, normalized);
+    };
+
+    try {
+      child = spawnImpl(executable, ['app-server', '--stdio'], {
+        cwd: os.homedir(),
+        env: {
+          ...process.env,
+          RUST_LOG: process.env.CODEX_RATE_LIMIT_RUST_LOG || 'error',
+        },
+        shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    timer = setTimeout(() => finish(failure('Codex rate-limit request timed out')), timeoutMs);
+    child.on('error', (error) => finish(error));
+    child.on('exit', (code) => {
+      if (!settled) finish(failure(`Codex app-server exited before replying (${code})`));
+    });
+    child.stderr.on('data', (chunk) => {
+      stderrBuffer = `${stderrBuffer}${chunk}`.slice(-4000);
+    });
+    child.stdout.on('data', (chunk) => {
+      stdoutBuffer += chunk;
+      if (stdoutBuffer.length > 1024 * 1024) {
+        finish(failure('Codex app-server response exceeded 1 MiB'));
+        return;
+      }
+      let newline = stdoutBuffer.indexOf('\n');
+      while (newline >= 0) {
+        const line = stdoutBuffer.slice(0, newline).trim();
+        stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        if (line) handleLine(line);
+        if (settled) return;
+        newline = stdoutBuffer.indexOf('\n');
+      }
+    });
+    child.on('spawn', () => send({
+      id: 1,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'claude-codex-usage-dashboard', version: '0.1.0' },
+        capabilities: { experimentalApi: false },
+      },
+    }));
+  });
 }
 
 function readClaudeUsage() {
@@ -299,31 +490,71 @@ function readCodexUsage() {
   };
 }
 
-let codexCache = { fetchedAt: 0, data: null };
+let codexCache = {
+  sessionCheckedAt: 0,
+  directAttemptAt: 0,
+  data: null,
+  promise: null,
+  lastWarning: null,
+};
 
 function getCodexUsage() {
   const now = Date.now();
-  if (codexCache.data && now - codexCache.fetchedAt < 8000) {
-    return codexCache.data;
+  if (!codexCache.data || now - codexCache.sessionCheckedAt >= CODEX_SESSION_CACHE_MS) {
+    let sessionData = null;
+    try {
+      sessionData = readCodexUsage();
+    } catch (error) {
+      sessionData = {
+        fetchedAt: null,
+        five: null,
+        seven: null,
+        source: 'codex-sessions',
+        stale: true,
+        staleAfterMs: CODEX_STALE_MINUTES * 60000,
+        error: error.message,
+      };
+    }
+    const directDataIsFresh = codexCache.data
+      && codexCache.data.source === 'codex-app-server'
+      && now - codexCache.data.fetchedAt <= codexCache.data.staleAfterMs;
+    if (!codexCache.data
+      || (!directDataIsFresh
+        && sessionData.fetchedAt
+        && sessionData.fetchedAt > (codexCache.data.fetchedAt || 0))) {
+      codexCache.data = sessionData;
+    }
+    codexCache.sessionCheckedAt = now;
   }
 
-  let data = null;
-  try {
-    data = readCodexUsage();
-  } catch (error) {
-    data = {
-      fetchedAt: null,
-      five: null,
-      seven: null,
-      source: 'codex-sessions',
-      stale: true,
-      staleAfterMs: CODEX_STALE_MINUTES * 60000,
-      error: error.message,
-    };
+  if (codexCache.data
+    && codexCache.data.source === 'codex-app-server'
+    && now - codexCache.data.fetchedAt > codexCache.data.staleAfterMs) {
+    codexCache.data = { ...codexCache.data, stale: true };
   }
 
-  codexCache = { fetchedAt: now, data };
-  return data;
+  if (CODEX_RATE_LIMITS_SOURCE !== 'sessions'
+    && !codexCache.promise
+    && now - codexCache.directAttemptAt >= CODEX_RATE_LIMIT_REFRESH_MS) {
+    codexCache.directAttemptAt = now;
+    codexCache.promise = queryCodexAppServerRateLimits()
+      .then((data) => {
+        codexCache.data = data;
+        codexCache.lastWarning = null;
+      })
+      .catch((error) => {
+        const message = error && error.message ? error.message : String(error);
+        if (message !== codexCache.lastWarning) {
+          console.warn('[dashboard-server] Codex live rate-limit refresh failed:', message);
+          codexCache.lastWarning = message;
+        }
+      })
+      .finally(() => {
+        codexCache.promise = null;
+      });
+  }
+
+  return codexCache.data;
 }
 
 function antigravityLineTimestamp(line, fileTimeMs) {
@@ -1049,14 +1280,17 @@ module.exports = {
   buildAgentCatalog,
   createDashboardServer,
   isUsableAntigravityData,
+  normalizeCodexAppServerRateLimits,
   normalizeAgentSnapshot,
   normalizeCodexRateLimits,
   pageHtml,
   parseAntigravityQuotaPayload,
   parseCodexEventLine,
+  queryCodexAppServerRateLimits,
   readCodexUsage,
   readExternalAgentSnapshots,
   readLatestCodexSnapshot,
   requestHostName,
+  resolveCodexExecutable,
   writeJsonAtomic,
 };

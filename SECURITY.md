@@ -8,6 +8,7 @@
 
 - Claude 使用缓存：~/.claude/usage-cache.json
 - Codex 会话中的配额事件：~/.codex/sessions/**/rollout-*.jsonl
+- 本机 Codex app-server 的 `account/rateLimits/read` 响应；认证由 Codex CLI 自己处理，面板不读取登录凭据
 - Antigravity CLI 日志与设置：~/.gemini/antigravity-cli/log 和 settings.json
 - Antigravity last-good 缓存：~/.claude-codex-usage-dashboard/antigravity-usage-cache.json
 
@@ -20,6 +21,7 @@ API 只返回配额百分比、重置时间、数据新鲜度、错误状态和�
 - HTTP 层拒绝非 loopback Host header，降低 DNS rebinding 风险。
 - 页面使用严格 CSP，只允许加载同源 CSS/JavaScript 并访问同源 API。
 - 页面不加载 Google Fonts 或其他远程资源。
+- Codex 配额刷新只启动本机 Codex CLI，并由它访问 OpenAI 的账户配额服务；面板不接触认证 token。
 - Antigravity gRPC 请求只访问 https://127.0.0.1:<port>。
 
 ## Electron 边界
@@ -36,6 +38,8 @@ Renderer 使用：
 Electron 应保持在 npm audit 无已知漏洞的受支持版本。
 
 ## 本地命令边界
+
+Codex 配额查询使用固定参数 `app-server --stdio`，通过 Node.js `spawn` 直接启动，不经过 shell。Windows 优先在 `%LOCALAPPDATA%\OpenAI\Codex\bin` 中选择最新 `codex.exe`，找不到时回退到 PATH，也可以用 `CODEX_EXECUTABLE` 显式覆盖。查询子进程设置 `RUST_LOG=error`，拿到响应或超时后立即退出。
 
 fanout 模式可以执行 config.json 或 EXTRA_STATUSLINE_COMMAND 中的命令。它们属于本机受信配置，不应写入从网络复制的未知命令。
 

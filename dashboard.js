@@ -1,6 +1,8 @@
 'use strict';
 
 const DEFAULT_ALERT_PERCENT = 85;
+const MAX_HUD_HEIGHT = 640;
+const SETTINGS_MIN_WIDTH = 480;
 const SETTINGS_KEY = 'usage-watch.settings.v1';
 const DENSITIES = new Set(['auto', 'compact', 'comfortable']);
 const LEGACY_AGENTS = [
@@ -13,8 +15,12 @@ let latestUsage = null;
 let currentCatalog = LEGACY_AGENTS;
 let currentSettings = null;
 let settingsOpen = false;
+let settingsClosing = false;
+let settingsCloseTimer = null;
 let resizeTimer = null;
 let lastResizeRequest = '';
+let lastResizeWidth = null;
+let settingsReturnFocus = null;
 
 function percentValue(windowData) {
   return windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used)
@@ -83,20 +89,22 @@ function normalizeSettings(raw, catalog = LEGACY_AGENTS) {
   return { visibleAgents, density };
 }
 
-function resolveLayout(agentCount, density = 'auto') {
+function resolveLayout(agentCount, density = 'auto', wideSingleCard = false) {
   const resolvedDensity = density === 'auto'
-    ? agentCount >= 5 ? 'compact' : agentCount === 1 ? 'comfortable' : 'standard'
+    ? agentCount >= 5 ? 'compact' : 'standard'
     : density;
   let columns = 1;
   if (agentCount >= 2) columns = 2;
   if (resolvedDensity === 'compact' && agentCount >= 5) columns = 3;
-  const cardHeight = resolvedDensity === 'compact' ? 68 : resolvedDensity === 'comfortable' ? 94 : 78;
+  const cardHeight = resolvedDensity === 'compact' ? 96 : resolvedDensity === 'comfortable' ? 126 : 108;
   const rows = Math.max(1, Math.ceil(Math.max(agentCount, 1) / columns));
+  const singleAgentWidth = wideSingleCard || resolvedDensity === 'comfortable' ? 320 : 240;
+  const naturalHeight = 68 + rows * cardHeight + Math.max(0, rows - 1) * 6;
   return {
     columns,
     density: resolvedDensity,
-    width: columns === 3 ? 480 : columns === 2 && resolvedDensity === 'comfortable' ? 400 : 300,
-    height: 57 + rows * cardHeight + Math.max(0, rows - 1) * 6,
+    width: agentCount === 1 ? singleAgentWidth : columns === 3 ? 600 : columns === 2 && resolvedDensity === 'comfortable' ? 500 : 380,
+    height: Math.min(MAX_HUD_HEIGHT, naturalHeight),
   };
 }
 
@@ -131,19 +139,29 @@ function quotaValueElement(windowData, alertPercent) {
   const valueNode = element('strong', 'quota-value', value === null ? '--' : `${value}%`);
   const level = quotaLevel(value, alertPercent);
   if (level !== 'normal') valueNode.classList.add(`is-${level}`);
-  return { value, valueNode };
+  return { level, value, valueNode };
 }
 
 function quotaGrid(windows, alertPercent, now) {
   const grid = element('div', 'quota-grid');
   for (const windowData of windows.slice(0, 4)) {
     const quota = element('div', 'quota');
-    const main = element('div', 'quota-main');
-    const label = element('span', 'window-label', windowData.label || String(windowData.id || 'quota').toUpperCase());
-    const { valueNode } = quotaValueElement(windowData, alertPercent);
-    const reset = element('span', 'reset-text', `reset ${resetText(windowData.resetAt, now)}`);
-    main.append(label, valueNode);
-    quota.append(main, reset);
+    const ring = element('span', 'quota-ring');
+    const copy = element('span', 'quota-copy');
+    const labelText = windowData.label || String(windowData.id || 'quota').toUpperCase();
+    const label = element('span', 'window-label', labelText);
+    const { level, value, valueNode } = quotaValueElement(windowData, alertPercent);
+    const resetLabel = resetText(windowData.resetAt, now);
+    const reset = element('span', 'reset-text', resetLabel);
+    reset.setAttribute('aria-label', `reset ${resetLabel}`);
+    const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
+    quota.title = `${labelText}, reset ${resetLabel}`;
+    ring.style.setProperty('--quota-progress', `${progress}%`);
+    ring.append(valueNode);
+    copy.append(label, reset);
+    quota.classList.add(`is-${level}`);
+    if (value === null) quota.classList.add('is-empty');
+    quota.append(ring, copy);
     grid.append(quota);
   }
   return grid;
@@ -158,7 +176,11 @@ function groupList(groups, alertPercent, now) {
     for (const windowData of dataWindows(group).slice(0, 3)) {
       const metric = element('span', 'group-metric');
       const windowLabel = element('span', 'window-label', windowData.label || String(windowData.id || '').toUpperCase());
-      const { valueNode } = quotaValueElement(windowData, alertPercent);
+      const { level, value, valueNode } = quotaValueElement(windowData, alertPercent);
+      const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
+      metric.classList.add(`is-${level}`);
+      if (value === null) metric.classList.add('is-empty');
+      metric.style.setProperty('--quota-progress', `${progress}%`);
       metric.title = `reset ${resetText(windowData.resetAt, now)}`;
       metric.append(windowLabel, valueNode);
       metrics.append(metric);
@@ -200,7 +222,10 @@ function renderAgentCard(agent, metadata, alertPercent, now) {
   }
 
   const values = (groups.length && (groups.length > 1 || !hasTopLevelUsage) ? groups.flatMap(dataWindows) : windows)
-    .map((windowData) => `${windowData.label || windowData.id} ${percentValue(windowData) ?? 'unavailable'} percent`)
+    .map((windowData) => (
+      `${windowData.label || windowData.id} ${percentValue(windowData) ?? 'unavailable'} percent, `
+      + `reset ${resetText(windowData.resetAt, now)}`
+    ))
     .join('. ');
   card.setAttribute('aria-label', `${agent.label || metadata.label} usage. ${values}. ${state.label}.`);
   return { card, state };
@@ -209,17 +234,22 @@ function renderAgentCard(agent, metadata, alertPercent, now) {
 function renderOverall(states) {
   const overall = document.getElementById('overall_state');
   if (!overall) return;
-  overall.classList.remove('is-live', 'is-stale', 'is-error');
+  let label;
+  let kind;
   if (!states.length) {
-    overall.textContent = 'no agents';
-    overall.classList.add('is-stale');
-    return;
+    label = 'no agents';
+    kind = 'stale';
+  } else {
+    const hasError = states.some((state) => state.kind === 'error');
+    const hasStale = states.some((state) => state.kind === 'stale');
+    kind = hasError ? 'error' : hasStale ? 'stale' : 'live';
+    label = hasError && states.every((state) => state.kind === 'error')
+      ? 'offline'
+      : hasError ? 'degraded' : hasStale ? 'stale data' : 'live';
   }
-  const hasError = states.some((state) => state.kind === 'error');
-  const hasStale = states.some((state) => state.kind === 'stale');
-  const kind = hasError ? 'error' : hasStale ? 'stale' : 'live';
-  overall.textContent = hasError ? 'degraded' : hasStale ? 'stale data' : 'live';
-  overall.classList.add(`is-${kind}`);
+  const className = `overall-state is-${kind}`;
+  if (overall.className !== className) overall.className = className;
+  if (overall.textContent !== label) overall.textContent = label;
 }
 
 function readSavedSettings(catalog) {
@@ -245,6 +275,7 @@ function sendDesktopResize(width, height) {
   const requestKey = `${width}x${height}`;
   if (requestKey === lastResizeRequest) return;
   lastResizeRequest = requestKey;
+  lastResizeWidth = width;
   window.desktopHud.resize(width, height);
 }
 
@@ -253,28 +284,56 @@ function requestDesktopResize(layout) {
   if (resizeTimer) clearTimeout(resizeTimer);
   if (settingsOpen) {
     resizeTimer = null;
-    sendDesktopResize(420, settingsWindowHeight(currentCatalog.length));
+    sendDesktopResize(Math.max(SETTINGS_MIN_WIDTH, layout.width), settingsWindowHeight(currentCatalog.length));
     return;
   }
+  if (settingsClosing) return;
 
-  if (Math.round(window.innerWidth) !== layout.width) {
-    sendDesktopResize(layout.width, layout.height);
+  const dashboard = document.getElementById('dashboard');
+  const preserveScrollableHeight = Boolean(
+    dashboard
+    && dashboard.classList.contains('is-scrollable')
+    && layout.height < MAX_HUD_HEIGHT,
+  );
+  if (lastResizeWidth !== layout.width || layout.height === MAX_HUD_HEIGHT) {
+    sendDesktopResize(layout.width, preserveScrollableHeight ? MAX_HUD_HEIGHT : layout.height);
   }
   resizeTimer = setTimeout(() => {
     resizeTimer = null;
     if (settingsOpen) return;
-    const dashboard = document.getElementById('dashboard');
     if (!dashboard) return;
-    const measuredHeight = Math.ceil(dashboard.getBoundingClientRect().height + 8);
-    sendDesktopResize(layout.width, Math.max(120, Math.min(640, measuredHeight)));
+    if (layout.height === MAX_HUD_HEIGHT) {
+      dashboard.classList.add('is-scrollable');
+      sendDesktopResize(layout.width, MAX_HUD_HEIGHT);
+      return;
+    }
+    const readouts = document.getElementById('readouts');
+    const readoutsScrollTop = readouts ? readouts.scrollTop : 0;
+    if (dashboard.classList.contains('is-scrollable')) {
+      dashboard.classList.remove('is-scrollable');
+    }
+
+    let measuredHeight = Math.ceil(dashboard.getBoundingClientRect().height + 8);
+    if (measuredHeight >= MAX_HUD_HEIGHT) {
+      dashboard.classList.add('is-scrollable');
+      if (readouts) readouts.scrollTop = readoutsScrollTop;
+      measuredHeight = MAX_HUD_HEIGHT;
+    }
+    sendDesktopResize(layout.width, Math.max(120, measuredHeight));
   }, 80);
 }
 
 function applyLayout(agentCount) {
   const dashboard = document.getElementById('dashboard');
   const readouts = document.getElementById('readouts');
-  const layout = resolveLayout(agentCount, currentSettings.density);
+  const wideSingleCard = agentCount === 1 && Boolean(readouts.querySelector('.readout.has-groups'));
+  const layout = resolveLayout(agentCount, currentSettings.density, wideSingleCard);
   dashboard.dataset.density = layout.density;
+  dashboard.classList.toggle(
+    'is-single-narrow',
+    agentCount === 1 && !wideSingleCard && layout.density !== 'comfortable',
+  );
+  if (layout.height === MAX_HUD_HEIGHT) dashboard.classList.add('is-scrollable');
   readouts.className = `readouts columns-${layout.columns}`;
   requestDesktopResize(layout);
 }
@@ -324,8 +383,6 @@ function renderOffline(error) {
     config: { agents: currentCatalog },
     agents: currentCatalog.map((agent) => ({ ...agent, ...data, windows: [], groups: [] })),
   });
-  const overall = document.getElementById('overall_state');
-  if (overall) overall.textContent = 'offline';
 }
 
 async function refreshUsage() {
@@ -341,6 +398,11 @@ async function refreshUsage() {
 function renderSettingsChoices() {
   const choices = document.getElementById('agent_choices');
   if (!choices || !currentSettings) return;
+  const panel = document.getElementById('settings_panel');
+  const scrollTop = panel ? panel.scrollTop : 0;
+  const activeChoice = settingsOpen && document.activeElement && document.activeElement.matches('.agent-choice input')
+    ? document.activeElement.value
+    : null;
   const selected = new Set(currentSettings.visibleAgents);
   const nodes = currentCatalog.map((agent) => {
     const label = element('label', 'agent-choice');
@@ -365,22 +427,58 @@ function renderSettingsChoices() {
     return label;
   });
   choices.replaceChildren(...nodes);
+  if (activeChoice) {
+    const replacement = Array.from(choices.querySelectorAll('input')).find((input) => input.value === activeChoice);
+    if (replacement) replacement.focus({ preventScroll: true });
+    else if (settingsOpen) document.getElementById('settings_close').focus({ preventScroll: true });
+  }
+  if (panel) panel.scrollTop = scrollTop;
 
   const density = document.querySelector(`input[name="density"][value="${currentSettings.density}"]`);
   if (density) density.checked = true;
 }
 
 function setSettingsOpen(open) {
+  if (settingsCloseTimer) {
+    clearTimeout(settingsCloseTimer);
+    settingsCloseTimer = null;
+  }
   settingsOpen = Boolean(open);
+  settingsClosing = !settingsOpen;
   const dashboard = document.getElementById('dashboard');
   const panel = document.getElementById('settings_panel');
   const toggle = document.getElementById('settings_toggle');
+  const background = [
+    document.querySelector('.watch-head'),
+    document.getElementById('readouts'),
+    document.getElementById('empty_state'),
+  ].filter(Boolean);
+  if (settingsOpen) settingsReturnFocus = document.activeElement;
   dashboard.classList.toggle('is-settings-open', settingsOpen);
-  panel.hidden = !settingsOpen;
+  for (const node of background) node.inert = settingsOpen;
+  panel.inert = !settingsOpen;
+  panel.setAttribute('aria-hidden', String(!settingsOpen));
   toggle.setAttribute('aria-expanded', String(settingsOpen));
-  applyLayout(currentSettings ? currentSettings.visibleAgents.length : 0);
-  if (settingsOpen) document.getElementById('settings_close').focus();
-  else toggle.focus();
+  toggle.setAttribute('aria-label', settingsOpen ? '关闭显示设置' : '打开显示设置');
+  toggle.title = settingsOpen ? '关闭显示设置' : '打开显示设置';
+  if (settingsOpen) {
+    settingsClosing = false;
+    applyLayout(currentSettings ? currentSettings.visibleAgents.length : 0);
+    document.getElementById('settings_close').focus();
+  } else {
+    const closeDelay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 150 : 310;
+    settingsCloseTimer = setTimeout(() => {
+      settingsCloseTimer = null;
+      if (settingsOpen) return;
+      settingsClosing = false;
+      applyLayout(currentSettings ? currentSettings.visibleAgents.length : 0);
+    }, closeDelay);
+    const returnTarget = settingsReturnFocus && settingsReturnFocus.isConnected && !settingsReturnFocus.closest('[hidden]')
+      ? settingsReturnFocus
+      : toggle;
+    settingsReturnFocus = null;
+    returnTarget.focus();
+  }
 }
 
 function installSettings() {
@@ -401,7 +499,31 @@ function installSettings() {
     });
   }
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && settingsOpen) setSettingsOpen(false);
+    if (!settingsOpen) return;
+    if (event.key === 'Escape') {
+      setSettingsOpen(false);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const panel = document.getElementById('settings_panel');
+    const focusable = Array.from(panel.querySelectorAll('button:not([disabled]), input:not([disabled])'))
+      .filter((node) => node.getClientRects().length > 0);
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    } else if (!panel.contains(document.activeElement)) {
+      event.preventDefault();
+      first.focus();
+    }
   });
 }
 
@@ -423,6 +545,7 @@ function installDesktopDrag() {
 
   watch.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.target.closest('button, input, label, [data-no-drag]')) return;
+    if (event.target.closest('.watch.is-scrollable .readouts')) return;
     pointerId = event.pointerId;
     watch.setPointerCapture(pointerId);
     window.desktopHud.beginDrag(event.screenX, event.screenY);
@@ -455,6 +578,7 @@ if (typeof module !== 'undefined' && module.exports) {
     percentValue,
     quotaLevel,
     resetText,
+    requestDesktopResize,
     resolveLayout,
     settingsWindowHeight,
     serviceState,

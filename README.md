@@ -2,7 +2,7 @@
 
 一个非官方的 Windows 本地悬浮面板，用于查看多个 AI Agent 的配额使用情况。
 
-面板只读取本机缓存与日志，内部 HTTP 服务严格绑定 loopback，不加载远程字体、脚本或图片。
+面板通过本机缓存、日志和本机 Codex CLI 获取配额，内部 HTTP 服务严格绑定 loopback，不加载远程字体、脚本或图片。
 
 ## 功能
 
@@ -12,7 +12,7 @@
 - 通过本地额度快照桥接 Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
 - 明确显示服务名、5H/7D 含义、数据年龄以及 LIVE、STALE、OFFLINE 状态。
 - 数据过期后不再把历史重置时间推算成新的未来周期。
-- Codex 日志按修改时间排序，并从文件尾部反向分块读取最新 rate_limits，避免周期性全量扫描。
+- Codex 默认每 60 秒最多通过本机 app-server 读取一次账户配额，失败时回退到会话文件，并从文件尾部反向分块读取最新 rate_limits。
 - Antigravity 在解析到有效配额前不会覆盖最后一份有效缓存。
 - 提供无边框、透明、始终置顶的 Electron 悬浮窗和托盘恢复入口。
 - 开机自启安装器只处理本项目拥有的快捷方式。
@@ -21,10 +21,10 @@
 
 ## 重要限制
 
-配额只会在对应 CLI 写入新数据后更新：
+各服务的数据刷新方式不同：
 
 - Claude 数据来自 Claude Code statusLine 缓存。网页或 Claude 桌面客户端不会刷新该缓存。
-- Codex 数据来自 ~/.codex/sessions 中最新的 rate_limits 事件。
+- Codex 默认调用本机 app-server 的 `account/rateLimits/read`，不创建模型对话、不消耗对话额度；CLI 不可用或请求失败时回退到 ~/.codex/sessions 中最新的 rate_limits 事件。
 - Antigravity 数据来自本机 Antigravity CLI gRPC 服务；连接失败时保留最后有效值并标记为 stale/offline。
 - Gemini CLI、GitHub Copilot、Cursor、OpenCode 等扩展项来自统一的本地快照目录；看板不会读取这些工具的登录凭据，也不会代替它们访问远程服务。
 
@@ -168,6 +168,11 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | CODEX_LOOKBACK_DAYS | 14 | 查找 Codex 会话文件的天数 |
 | CLAUDE_STALE_MINUTES | 10 | Claude 数据过期阈值 |
 | CODEX_STALE_MINUTES | 120 | Codex 数据过期阈值 |
+| CODEX_RATE_LIMITS_SOURCE | auto | `auto` 通过 app-server 刷新并回退到 sessions；`sessions` 只读取会话文件 |
+| CODEX_RATE_LIMIT_REFRESH_SECONDS | 60 | app-server 配额查询的最短间隔，范围 15～3600 秒 |
+| CODEX_APP_SERVER_TIMEOUT_SECONDS | 15 | 单次 app-server 配额查询超时，范围 3～60 秒 |
+| CODEX_EXECUTABLE | 自动发现 | 指定 Codex CLI 可执行文件；Windows 默认选择最新本机安装 |
+| CODEX_RATE_LIMIT_RUST_LOG | error | 配额查询子进程的 Rust 日志级别 |
 | ANTIGRAVITY_STALE_MINUTES | 120 | Antigravity 数据过期阈值 |
 | CLAUDE_USAGE_CACHE | ~/.claude/usage-cache.json | Claude 缓存路径 |
 | CODEX_SESSIONS_DIR | ~/.codex/sessions | Codex 会话目录 |

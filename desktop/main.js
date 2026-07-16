@@ -57,8 +57,9 @@ let tray = null;
 let isQuitting = false;
 let lastServerError = '';
 
-const DEFAULT_WIDTH = 300;
+const DEFAULT_WIDTH = 380;
 const DEFAULT_HEIGHT = 224;
+const MIN_HUD_WIDTH = 240;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -306,7 +307,7 @@ function bindDragIpc() {
     const width = Math.round(Number(size.width));
     const height = Math.round(Number(size.height));
     if (!Number.isFinite(width) || !Number.isFinite(height)) return;
-    if (width < 280 || width > 640 || height < 120 || height > 640) return;
+    if (width < MIN_HUD_WIDTH || width > 640 || height < 120 || height > 640) return;
     const current = mainWindow.getBounds();
     if (current.width === width && current.height === height) return;
     const bounds = clampToScreen({
