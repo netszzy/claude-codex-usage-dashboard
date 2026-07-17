@@ -9,7 +9,8 @@
 - 自动显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
 - 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展三种卡片样式间切换。
 - 悬浮窗按已选 Agent 数量自动调整为 1～3 列并同步改变窗口尺寸。
-- 通过本地额度快照桥接 Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
+- 通过本地额度快照桥接 Kimi Code、Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
+- 内置 kimi-usage-snapshot.js，用本机 Kimi Code CLI 登录态读取官方 /usages 接口并写入快照。
 - 明确显示服务名、5H/7D 含义、数据年龄以及 LIVE、STALE、OFFLINE 状态。
 - 数据过期后不再把历史重置时间推算成新的未来周期。
 - Codex 默认每 60 秒最多通过本机 app-server 读取一次账户配额，失败时回退到会话文件，并从文件尾部反向分块读取最新 rate_limits。
@@ -27,6 +28,7 @@
 - Codex 默认调用本机 app-server 的 `account/rateLimits/read`，不创建模型对话、不消耗对话额度；CLI 不可用或请求失败时回退到 ~/.codex/sessions 中最新的 rate_limits 事件。
 - Antigravity 数据来自本机 Antigravity CLI gRPC 服务；连接失败时保留最后有效值并标记为 stale/offline。
 - Gemini CLI、GitHub Copilot、Cursor、OpenCode 等扩展项来自统一的本地快照目录；看板不会读取这些工具的登录凭据，也不会代替它们访问远程服务。
+- Kimi Code 数据来自 kimi-usage-snapshot.js 通过本机 CLI 的 OAuth 登录态请求官方 /usages 接口；看板服务默认每 60 秒自动运行一次该脚本（KIMI_USAGE_BRIDGE=off 可关闭），凭据只被脚本进程使用。
 
 本项目与 Anthropic、OpenAI 或 Google 无隶属关系，也不包含其官方 Logo。
 
@@ -75,7 +77,7 @@ Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现�
 %USERPROFILE%\.claude-codex-usage-dashboard\agents
 ~~~
 
-内置文件名为 `gemini.json`、`github-copilot.json`、`cursor.json`、`opencode.json`。目录中其他符合 `[a-z0-9][a-z0-9_-]{0,31}.json` 的文件会自动成为自定义 Agent；最多读取 32 个文件，单文件最大 256 KiB。额度百分比统一使用 `0～100`，时间可使用 Unix 毫秒或 ISO 8601。
+内置文件名为 `kimi.json`、`gemini.json`、`github-copilot.json`、`cursor.json`、`opencode.json`。目录中其他符合 `[a-z0-9][a-z0-9_-]{0,31}.json` 的文件会自动成为自定义 Agent；最多读取 32 个文件，单文件最大 256 KiB。额度百分比统一使用 `0～100`，时间可使用 Unix 毫秒或 ISO 8601。
 
 最小快照示例：
 
@@ -113,6 +115,19 @@ Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现�
 ~~~
 
 快照只接收白名单字段：`label`、`accent`、`source`、`fetchedAt`、`staleAfterMs`、`stale`、`error`、`windows`、`groups`。凭据、提示词等其他字段不会进入 API。让对应 Agent 的官方命令或你自己的本地脚本更新该文件即可；看板每 5 秒重新读取。
+
+## Kimi Code 额度桥接
+
+Kimi Code（Kimi K3 / K2.7）的 5 小时滚动窗口和 7 天额度由随附脚本写入 `kimi.json`。看板运行期间，服务默认每 60 秒自动运行一次桥接脚本，无需额外进程：
+
+~~~powershell
+node kimi-usage-snapshot.js          # 手动单次刷新
+node kimi-usage-snapshot.js --watch  # 脱离看板时每 5 分钟自动刷新
+~~~
+
+脚本复用 Kimi Code CLI 的本机 OAuth 登录态（`~/.kimi-code/credentials/kimi-code.json`），请求与 CLI `/usage` 命令同源的官方 `GET /usages` 接口。只有额度百分比和重置时间会写入快照；访问令牌不会进入快照、日志或看板服务。访问令牌约 15 分钟过期，脚本会自动用凭据里的 refresh_token 续期并原子回写凭据文件（带文件锁避免与 CLI 同时刷新竞争）；只有 refresh_token 本身被服务端拒绝时才需要重新 /login。单次刷新失败时保留最后一份有效快照，没有有效快照时才写入错误占位。也可以用 `KIMI_USAGE_TOKEN` 环境变量直接提供 Kimi Code Console 签发的 API Key，跳过 OAuth 文件。
+
+日常使用时，把单次模式挂到 Windows 任务计划程序，或让 `--watch` 模式随看板一起启动即可。
 
 ## Claude statusLine 配置
 
@@ -182,6 +197,18 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | AGENT_USAGE_DIR | ~/.claude-codex-usage-dashboard/agents | 扩展 Agent 的本地额度快照目录 |
 | EXTERNAL_AGENT_STALE_MINUTES | 120 | 扩展 Agent 默认过期阈值 |
 | EXTRA_STATUSLINE_COMMAND | 空 | fanout 的额外命令，优先于 config.json |
+| KIMI_CODE_HOME | ~/.kimi-code | Kimi Code CLI 的数据目录 |
+| KIMI_CODE_CREDENTIALS | KIMI_CODE_HOME/credentials/kimi-code.json | Kimi OAuth 凭据路径 |
+| KIMI_USAGE_TOKEN | 空 | 直接使用 API Key，跳过 OAuth 凭据文件 |
+| KIMI_USAGE_BASE_URL | https://api.kimi.com/coding/v1 | Kimi Code API 地址 |
+| KIMI_OAUTH_TOKEN_URL | https://auth.kimi.com/api/oauth/token | Kimi OAuth 续期端点 |
+| KIMI_OAUTH_CLIENT_ID | Kimi Code CLI 官方 client_id | OAuth 续期使用的 client_id |
+| KIMI_USAGE_TIMEOUT_SECONDS | 8 | 单次 /usages 请求超时，范围 3～60 秒 |
+| KIMI_USAGE_BRIDGE | auto | auto 时看板服务按固定间隔自动运行桥接脚本；off 完全手动 |
+| KIMI_USAGE_REFRESH_SECONDS | 60（服务端）/ 300（--watch） | Kimi 额度刷新间隔，范围 15～3600 秒 |
+| KIMI_USAGE_STALE_MINUTES | 30 | Kimi 快照过期阈值 |
+| KIMI_USAGE_SNAPSHOT | AGENT_USAGE_DIR/kimi.json | Kimi 快照输出路径 |
+| KIMI_USAGE_LABEL | Kimi Code | Kimi 卡片显示名称 |
 
 示例：
 
@@ -214,6 +241,7 @@ npm run check 会检查所有 JavaScript 文件语法并运行测试。
 - 服务只监听本机 loopback。
 - API 只返回配额摘要、状态和模型/分组标签，不返回会话正文或扩展快照中的非白名单字段。
 - Antigravity gRPC 请求只发往 127.0.0.1。
+- Kimi 桥接脚本仅在请求官方 /usages 接口时使用本机 OAuth 凭据；快照只包含额度百分比与重置时间。
 - 项目不会上传本地缓存或日志。
 
 不要提交 Claude/Codex 本地缓存、Claude 设置、config.json、凭据或可能暴露账号/路径/工作区的截图。

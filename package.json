@@ -13,7 +13,7 @@
     "setup:claude": "node setup-statusline.js",
     "setup:claude:fanout": "node setup-statusline.js --fanout",
     "test": "node --test",
-    "check": "node --check server.js && node --check dashboard.js && node --check desktop/main.js && node --check desktop/preload.js && node --check setup-statusline.js && node --check statusline-usage.js && node --check statusline-both.js && node --check scripts/ensure-electron.js && node scripts/ensure-electron.js --check && npm test"
+    "check": "node --check server.js && node --check kimi-usage-snapshot.js && node --check dashboard.js && node --check desktop/main.js && node --check desktop/preload.js && node --check setup-statusline.js && node --check statusline-usage.js && node --check statusline-both.js && node --check scripts/ensure-electron.js && node scripts/ensure-electron.js --check && npm test"
   },
   "keywords": [
     "claude",

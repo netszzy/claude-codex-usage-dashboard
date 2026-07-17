@@ -198,3 +198,78 @@ test('local HTTP routes enforce host, method, route, and CSP boundaries', async 
     server.close();
   }
 });
+
+
+const {
+  createKimiUsageBridgeRefresher,
+  refreshKimiUsageSnapshot,
+} = require('../server');
+
+function fakeKimiBridgeSpawn({ code = 0, stderr = '' } = {}) {
+  const calls = [];
+  const spawnImpl = (executable, args, options) => {
+    const child = new EventEmitter();
+    child.stderr = new PassThrough();
+    child.kill = () => {
+      child.killed = true;
+    };
+    calls.push({ executable, args, options, child });
+    process.nextTick(() => {
+      if (stderr) child.stderr.write(stderr);
+      child.stderr.end();
+      child.emit('exit', code);
+    });
+    return child;
+  };
+  return { calls, spawnImpl };
+}
+
+test('Kimi usage bridge spawn runs the snapshot script as plain node', async () => {
+  const { calls, spawnImpl } = fakeKimiBridgeSpawn();
+  await refreshKimiUsageSnapshot({ spawnImpl, scriptPath: 'bridge.js', timeoutMs: 1000 });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].executable, process.execPath);
+  assert.deepEqual(calls[0].args, ['bridge.js']);
+  assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.windowsHide, true);
+});
+
+test('Kimi usage bridge spawn surfaces stderr on failure', async () => {
+  const { spawnImpl } = fakeKimiBridgeSpawn({ code: 1, stderr: 'boom' });
+  await assert.rejects(
+    refreshKimiUsageSnapshot({ spawnImpl, scriptPath: 'bridge.js', timeoutMs: 1000 }),
+    /boom/,
+  );
+});
+
+test('Kimi usage bridge refresher throttles spawns and warns once per failure', async () => {
+  const { calls, spawnImpl } = fakeKimiBridgeSpawn({ code: 1, stderr: 'denied' });
+  const warnings = [];
+  const refresh = createKimiUsageBridgeRefresher({
+    enabled: true,
+    refreshMs: 1000,
+    spawnImpl,
+    scriptPath: 'bridge.js',
+    timeoutMs: 1000,
+    warn: (message) => warnings.push(message),
+  });
+  const start = Date.now();
+
+  assert.equal(refresh(start), true);
+  assert.equal(refresh(start + 10), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refresh(start + 500), false);
+  assert.equal(refresh(start + 1001), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.length, 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /denied/);
+
+  const disabled = createKimiUsageBridgeRefresher({ enabled: false, spawnImpl });
+  assert.equal(disabled(), false);
+  assert.equal(calls.length, 2);
+});

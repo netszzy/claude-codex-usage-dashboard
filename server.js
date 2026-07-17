@@ -46,6 +46,19 @@ const CODEX_APP_SERVER_TIMEOUT_SECONDS = envNumber('CODEX_APP_SERVER_TIMEOUT_SEC
 });
 const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120, { min: 0 });
 const EXTERNAL_AGENT_STALE_MINUTES = envNumber('EXTERNAL_AGENT_STALE_MINUTES', 120, { min: 0 });
+const KIMI_USAGE_REFRESH_SECONDS = envNumber('KIMI_USAGE_REFRESH_SECONDS', 60, {
+  integer: true,
+  min: 15,
+  max: 3600,
+});
+const KIMI_USAGE_REFRESH_MS = KIMI_USAGE_REFRESH_SECONDS * 1000;
+const KIMI_USAGE_BRIDGE = String(process.env.KIMI_USAGE_BRIDGE || 'auto').trim().toLowerCase();
+const KIMI_BRIDGE_SCRIPT = path.join(__dirname, 'kimi-usage-snapshot.js');
+const KIMI_BRIDGE_TIMEOUT_MS = 30000;
+
+if (!new Set(['auto', 'off']).has(KIMI_USAGE_BRIDGE)) {
+  throw new Error('KIMI_USAGE_BRIDGE must be auto or off');
+}
 const CODEX_SCAN_CHUNK_BYTES = 256 * 1024;
 const CODEX_MAX_LINE_BYTES = 2 * 1024 * 1024;
 const CODEX_SESSION_CACHE_MS = 8000;
@@ -82,6 +95,7 @@ const AGENT_PRESETS = Object.freeze([
   { id: 'claude', label: 'Claude Code', accent: '#d99a5d', defaultVisible: true, source: 'statusline-cache' },
   { id: 'codex', label: 'Codex', accent: '#67bdb4', defaultVisible: true, source: 'codex-sessions' },
   { id: 'antigravity', label: 'Antigravity', accent: '#9fbd69', defaultVisible: true, source: 'antigravity-grpc' },
+  { id: 'kimi', label: 'Kimi Code', accent: '#4e7df0', defaultVisible: false, source: 'local-bridge' },
   { id: 'gemini', label: 'Gemini CLI', accent: '#79a9d8', defaultVisible: false, source: 'local-bridge' },
   { id: 'github-copilot', label: 'GitHub Copilot', accent: '#b49ad8', defaultVisible: false, source: 'local-bridge' },
   { id: 'cursor', label: 'Cursor', accent: '#c5b98b', defaultVisible: false, source: 'local-bridge' },
@@ -1166,10 +1180,91 @@ function buildAgentCatalog(agents) {
   return catalog;
 }
 
+function refreshKimiUsageSnapshot(options = {}) {
+  const spawnImpl = options.spawnImpl || spawn;
+  const scriptPath = options.scriptPath || KIMI_BRIDGE_SCRIPT;
+  const timeoutMs = options.timeoutMs || KIMI_BRIDGE_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    let child = null;
+    let settled = false;
+    let stderrBuffer = '';
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch {}
+      if (error) reject(error);
+      else resolve();
+    };
+
+    try {
+      child = spawnImpl(process.execPath, [scriptPath], {
+        cwd: os.homedir(),
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1',
+          NODE_NO_WARNINGS: '1',
+        },
+        shell: false,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const timer = setTimeout(() => finish(new Error('Kimi usage bridge timed out')), timeoutMs);
+    child.on('error', (error) => finish(error));
+    child.on('exit', (code) => {
+      const detail = stderrBuffer.trim().slice(-300);
+      finish(code === 0
+        ? null
+        : new Error(`Kimi usage bridge exited with code ${code}${detail ? `: ${detail}` : ''}`));
+    });
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        stderrBuffer = `${stderrBuffer}${chunk}`.slice(-1000);
+      });
+    }
+  });
+}
+
+function createKimiUsageBridgeRefresher(options = {}) {
+  const enabled = options.enabled !== undefined ? options.enabled : KIMI_USAGE_BRIDGE === 'auto';
+  const refreshMs = options.refreshMs || KIMI_USAGE_REFRESH_MS;
+  const warn = options.warn
+    || ((message) => console.warn('[dashboard-server] Kimi usage bridge refresh failed:', message));
+  let attemptAt = 0;
+  let promise = null;
+  let lastWarning = null;
+
+  return function refreshKimiUsage(now = Date.now()) {
+    if (!enabled || promise || now - attemptAt < refreshMs) return false;
+    attemptAt = now;
+    promise = refreshKimiUsageSnapshot(options)
+      .catch((error) => {
+        const message = error && error.message ? error.message : String(error);
+        if (message !== lastWarning) {
+          warn(message);
+          lastWarning = message;
+        }
+      })
+      .finally(() => {
+        promise = null;
+      });
+    return true;
+  };
+}
+
+const kimiUsageBridgeRefresh = createKimiUsageBridgeRefresher();
+
 async function defaultUsageProvider() {
   const claude = readClaudeUsage();
   const codex = getCodexUsage();
   const antigravity = await getAntigravityUsage();
+  kimiUsageBridgeRefresh();
   const coreData = { claude, codex, antigravity };
   const agents = AGENT_PRESETS.slice(0, 3).map((preset) => (
     builtinAgentSnapshot(preset, coreData[preset.id])
@@ -1279,6 +1374,7 @@ if (require.main === module) {
 module.exports = {
   buildAgentCatalog,
   createDashboardServer,
+  createKimiUsageBridgeRefresher,
   isUsableAntigravityData,
   normalizeCodexAppServerRateLimits,
   normalizeAgentSnapshot,
@@ -1290,6 +1386,7 @@ module.exports = {
   readCodexUsage,
   readExternalAgentSnapshots,
   readLatestCodexSnapshot,
+  refreshKimiUsageSnapshot,
   requestHostName,
   resolveCodexExecutable,
   writeJsonAtomic,
