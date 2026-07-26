@@ -9,6 +9,7 @@ const {
   ageText,
   normalizeSettings,
   quotaLevel,
+  quotaTitle,
   resetText,
   requestDesktopResize,
   resolveLayout,
@@ -206,4 +207,22 @@ test('main quota card keeps reset countdowns visible and legible at standard den
   assert.match(stylesheet, /\[data-density="compact"\] \.quota-ring\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/s);
   assert.match(stylesheet, /\.watch\.is-scrollable \.readouts\s*\{[^}]*overflow-y:\s*auto;/s);
   assert.match(script, /element\('span', 'reset-text', resetLabel\)/);
+});
+
+test('grouped agent cards render individual reset countdowns for each group window', () => {
+  const script = fs.readFileSync(path.join(__dirname, '..', 'dashboard.js'), 'utf8');
+  const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+  assert.match(script, /metric\.append\(windowLabel,\s*valueNode,\s*resetNode\)/);
+  // Group metrics must be able to wrap, otherwise the countdowns are clipped by
+  // .readout { overflow: hidden } in the 3-column compact layout.
+  assert.match(stylesheet, /\.group-metrics\s*\{[^}]*flex-wrap:\s*wrap;/s);
+  assert.match(stylesheet, /\.group-label\s*\{[^}]*min-width:\s*56px;/s);
+  // Density overrides are more specific than `.group-metric .reset-text`, so the
+  // compact card must restate the smaller size or it renders larger than standard.
+  assert.match(stylesheet, /\[data-density="compact"\] \.group-metric \.reset-text\s*\{[^}]*font-size:\s*9\.5px;/s);
+});
+
+test('quota tooltips report the label, percentage and countdown as text', () => {
+  assert.equal(quotaTitle('5H', 42, '3h 20m'), '5H 42%, reset 3h 20m');
+  assert.equal(quotaTitle('7D', null, 'no reset'), '7D --, reset no reset');
 });

@@ -142,6 +142,10 @@ function quotaValueElement(windowData, alertPercent) {
   return { level, value, valueNode };
 }
 
+function quotaTitle(labelText, value, resetLabel) {
+  return `${labelText} ${value === null ? '--' : `${value}%`}, reset ${resetLabel}`;
+}
+
 function quotaGrid(windows, alertPercent, now) {
   const grid = element('div', 'quota-grid');
   for (const windowData of windows.slice(0, 4)) {
@@ -155,7 +159,7 @@ function quotaGrid(windows, alertPercent, now) {
     const reset = element('span', 'reset-text', resetLabel);
     reset.setAttribute('aria-label', `reset ${resetLabel}`);
     const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
-    quota.title = `${labelText}, reset ${resetLabel}`;
+    quota.title = quotaTitle(labelText, value, resetLabel);
     ring.style.setProperty('--quota-progress', `${progress}%`);
     ring.append(valueNode);
     copy.append(label, reset);
@@ -175,14 +179,18 @@ function groupList(groups, alertPercent, now) {
     const metrics = element('span', 'group-metrics');
     for (const windowData of dataWindows(group).slice(0, 3)) {
       const metric = element('span', 'group-metric');
-      const windowLabel = element('span', 'window-label', windowData.label || String(windowData.id || '').toUpperCase());
+      const labelText = windowData.label || String(windowData.id || '').toUpperCase();
+      const windowLabel = element('span', 'window-label', labelText);
       const { level, value, valueNode } = quotaValueElement(windowData, alertPercent);
       const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
+      const resetLabel = resetText(windowData.resetAt, now);
+      const resetNode = element('span', 'reset-text', resetLabel);
+      resetNode.setAttribute('aria-label', `reset ${resetLabel}`);
       metric.classList.add(`is-${level}`);
       if (value === null) metric.classList.add('is-empty');
       metric.style.setProperty('--quota-progress', `${progress}%`);
-      metric.title = `reset ${resetText(windowData.resetAt, now)}`;
-      metric.append(windowLabel, valueNode);
+      metric.title = quotaTitle(labelText, value, resetLabel);
+      metric.append(windowLabel, valueNode, resetNode);
       metrics.append(metric);
     }
     row.append(label, metrics);
@@ -577,6 +585,7 @@ if (typeof module !== 'undefined' && module.exports) {
     normalizeSettings,
     percentValue,
     quotaLevel,
+    quotaTitle,
     resetText,
     requestDesktopResize,
     resolveLayout,

@@ -504,7 +504,7 @@ label:has(input:focus-visible) {
   min-width: 0;
   margin: 0;
   overflow: hidden;
-  color: var(--tertiary);
+  color: var(--secondary);
   font-size: 11.5px;
   font-weight: 650;
   letter-spacing: 0.01em;
@@ -515,8 +515,9 @@ label:has(input:focus-visible) {
 
 .reset-text::before {
   margin: 0 3px;
-  color: var(--quaternary);
+  color: var(--secondary);
   content: "·";
+  opacity: 0.6;
 }
 
 .group-list {
@@ -526,15 +527,15 @@ label:has(input:focus-visible) {
 }
 
 .group-row {
-  display: grid;
-  grid-template-columns: minmax(64px, 1fr) auto;
+  display: flex;
   align-items: center;
   gap: 7px;
   min-width: 0;
 }
 
 .group-label {
-  min-width: 0;
+  flex: 1 1 auto;
+  min-width: 56px;
   overflow: hidden;
   color: var(--secondary);
   font-size: 9.5px;
@@ -544,18 +545,34 @@ label:has(input:focus-visible) {
 }
 
 .group-metrics {
-  display: inline-grid;
-  grid-auto-flow: column;
-  gap: 6px;
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 6px;
+  min-width: 0;
 }
 
 .group-metric {
   --quota-color: var(--agent-accent);
   display: inline-grid;
-  grid-template-columns: auto auto;
+  grid-template-columns: auto auto auto;
   align-items: baseline;
-  gap: 3px;
+  gap: 3.5px;
   min-width: 36px;
+}
+
+.group-metric .reset-text {
+  color: var(--secondary);
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.95;
+}
+
+/* The grid gap already separates the value from the countdown, so the dot only
+   needs its trailing margin. */
+.group-metric .reset-text::before {
+  margin: 0 3px 0 0;
 }
 
 .group-metric::after {
@@ -915,7 +932,8 @@ label:has(input:focus-visible) {
 }
 
 .watch[data-density="compact"] .reset-text {
-  font-size: 11px;
+  font-size: 11.5px;
+  color: var(--secondary);
 }
 
 .watch[data-density="compact"] .quota-value {
@@ -923,6 +941,14 @@ label:has(input:focus-visible) {
 }
 
 .watch[data-density="compact"] .window-label {
+  font-size: 9.5px;
+}
+
+.watch[data-density="compact"] .group-metric .quota-value {
+  font-size: 11px;
+}
+
+.watch[data-density="compact"] .group-metric .reset-text {
   font-size: 9.5px;
 }
 
@@ -946,11 +972,20 @@ label:has(input:focus-visible) {
 }
 
 .watch[data-density="comfortable"] .reset-text {
-  font-size: 12.5px;
+  font-size: 13px;
+  color: var(--ink);
 }
 
 .watch[data-density="comfortable"] .window-label {
   font-size: 10.5px;
+}
+
+.watch[data-density="comfortable"] .group-metric .quota-value {
+  font-size: 13px;
+}
+
+.watch[data-density="comfortable"] .group-metric .reset-text {
+  font-size: 11.5px;
 }
 
 html.desktop-shell,
