@@ -22,6 +22,8 @@ let resizeTimer = null;
 let lastResizeRequest = '';
 let lastResizeWidth = null;
 let settingsReturnFocus = null;
+let lastRenderSignature = null;
+let previousCardSignatures = new Map();
 
 function percentValue(windowData) {
   return windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used)
@@ -155,6 +157,43 @@ function agentsFromUsage(usage) {
       { id: 'seven', label: '7D', ...((usage && usage[metadata.id] && usage[metadata.id].seven) || {}) },
     ],
   }));
+}
+
+function windowDataSignature(windows) {
+  return windows.map((windowData) => [
+    windowData.label || windowData.id || '',
+    percentValue(windowData),
+    windowData.resetAt || 0,
+  ]);
+}
+
+// ponytail: fetchedAt is deliberately unsigned — age labels stay fresh via the
+// minute bucket in usageSignature, and signing it would re-render (and flash)
+// on every upstream refresh even when nothing visible changed.
+function agentSignature(agent) {
+  return [
+    agent.id,
+    agent.label || '',
+    agent.accent || '',
+    agent.error || '',
+    agent.stale ? 1 : 0,
+    windowDataSignature(dataWindows(agent)),
+    Array.isArray(agent.groups)
+      ? agent.groups.map((group) => [group.label || '', windowDataSignature(dataWindows(group))])
+      : [],
+  ];
+}
+
+function usageSignature(usage, settings, catalog, now = Date.now()) {
+  return JSON.stringify({
+    minute: Math.floor(now / 60000),
+    alert: usage && usage.config && typeof usage.config.alertPercent === 'number'
+      ? usage.config.alertPercent
+      : null,
+    settings,
+    catalog: catalog.map((agent) => [agent.id, agent.label || '', agent.accent || '', agent.bridgeFile || '']),
+    agents: agentsFromUsage(usage).map(agentSignature),
+  });
 }
 
 function offlineUsage(usage, catalog, error) {
@@ -430,6 +469,16 @@ function renderUsage(usage, now = Date.now()) {
   currentCatalog = nextCatalog;
   if (!currentSettings || catalogChanged) currentSettings = readSavedSettings(currentCatalog);
 
+  const dashboard = document.getElementById('dashboard');
+  dashboard.setAttribute('aria-busy', 'false');
+
+  // ponytail: full DOM rebuilds every 5s poll waste layout work; data only moves
+  // when a source refreshes, so rebuild on signature change (minute bucket keeps
+  // age/reset labels ticking). Upgrade path: persistent DOM diffing.
+  const signature = usageSignature(usage, currentSettings, currentCatalog, now);
+  if (signature === lastRenderSignature) return;
+  lastRenderSignature = signature;
+
   const alertPercent = usage && usage.config && typeof usage.config.alertPercent === 'number'
     ? usage.config.alertPercent
     : DEFAULT_ALERT_PERCENT;
@@ -438,6 +487,7 @@ function renderUsage(usage, now = Date.now()) {
   const readouts = document.getElementById('readouts');
   const states = [];
   const cards = [];
+  const nextCardSignatures = new Map();
   for (const id of currentSettings.visibleAgents) {
     const metadata = catalogById.get(id);
     if (!metadata) continue;
@@ -449,17 +499,21 @@ function renderUsage(usage, now = Date.now()) {
       groups: [],
     };
     const rendered = renderAgentCard(agent, metadata, alertPercent, now);
+    const cardSignature = JSON.stringify(agentSignature(agent));
+    if (previousCardSignatures.get(id) && previousCardSignatures.get(id) !== cardSignature) {
+      rendered.card.classList.add('is-updated');
+    }
+    nextCardSignatures.set(id, cardSignature);
     cards.push(rendered.card);
     states.push(rendered.state);
   }
+  previousCardSignatures = nextCardSignatures;
   readouts.replaceChildren(...cards);
   const emptyState = document.getElementById('empty_state');
   emptyState.hidden = cards.length > 0;
   renderOverall(states);
-  renderSettingsChoices(now);
+  if (settingsOpen) renderSettingsChoices(now);
   applyLayout(cards.length);
-  const dashboard = document.getElementById('dashboard');
-  dashboard.setAttribute('aria-busy', 'false');
 }
 
 function renderOffline(error) {
@@ -549,6 +603,7 @@ function setSettingsOpen(open) {
   toggle.title = settingsOpen ? '关闭显示设置' : '打开显示设置';
   if (settingsOpen) {
     settingsClosing = false;
+    renderSettingsChoices();
     applyLayout(currentSettings ? currentSettings.visibleAgents.length : 0);
     document.getElementById('settings_close').focus();
   } else {
@@ -655,23 +710,25 @@ function init() {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    ageText,
-    choiceState,
-    createUsageRefresher,
-    installUsagePolling,
-    normalizeSettings,
-    offlineUsage,
-    overallState,
-    percentValue,
-    quotaLevel,
-    quotaTitle,
-    resetText,
-    requestDesktopResize,
-    resolveLayout,
-    settingsWindowHeight,
-    serviceState,
-  };
+module.exports = {
+  ageText,
+  agentSignature,
+  choiceState,
+  createUsageRefresher,
+  installUsagePolling,
+  normalizeSettings,
+  offlineUsage,
+  overallState,
+  percentValue,
+  quotaLevel,
+  quotaTitle,
+  resetText,
+  requestDesktopResize,
+  resolveLayout,
+  settingsWindowHeight,
+  serviceState,
+  usageSignature,
+};
 }
 
 if (typeof window !== 'undefined' && typeof document !== 'undefined') init();

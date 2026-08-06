@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
   ageText,
+  agentSignature,
   choiceState,
   createUsageRefresher,
   installUsagePolling,
@@ -20,6 +21,7 @@ const {
   resolveLayout,
   settingsWindowHeight,
   serviceState,
+  usageSignature,
 } = require('../dashboard');
 
 test('expired reset timestamps are not projected into a future cycle', () => {
@@ -381,4 +383,76 @@ test('alert text keeps readable contrast without changing the progress accent', 
   assert.ok(contrast(lightText, '#ffffff') >= 4.5);
   assert.match(stylesheet, /\.quota-value\.is-alert\s*\{[^}]*color:\s*var\(--alert-text\)/s);
   assert.match(stylesheet, /\.quota\.is-alert\s*\{[^}]*--quota-color:\s*var\(--alert\)/s);
+});
+
+test('usage signature stays stable for identical data within the same minute', () => {
+  const now = Date.UTC(2026, 7, 6, 12, 30, 15);
+  const catalog = [{ id: 'claude', label: 'Claude Code' }, { id: 'codex', label: 'Codex' }];
+  const settings = { visibleAgents: ['claude', 'codex'], density: 'auto' };
+  const usage = {
+    agents: [
+      { id: 'claude', fetchedAt: now - 5000, windows: [{ id: 'five', used: 42, resetAt: now + 3600000 }] },
+      { id: 'codex', fetchedAt: now - 5000, windows: [{ id: 'five', used: 10, resetAt: now + 3600000 }] },
+    ],
+  };
+  const first = usageSignature(usage, settings, catalog, now);
+  assert.equal(usageSignature(usage, settings, catalog, now + 30_000), first);
+
+  // refreshed timestamps with unchanged values must not bust the signature:
+  // otherwise the render skip is dead code and cards flash on every poll
+  const restamped = { agents: usage.agents.map((agent) => ({ ...agent, fetchedAt: now })) };
+  assert.equal(usageSignature(restamped, settings, catalog, now), first);
+});
+
+test('usage signature changes when values, state or the minute bucket move', () => {
+  const now = Date.UTC(2026, 7, 6, 12, 30, 15);
+  const catalog = [{ id: 'claude', label: 'Claude Code' }];
+  const settings = { visibleAgents: ['claude'], density: 'auto' };
+  const usage = {
+    agents: [{ id: 'claude', fetchedAt: now, windows: [{ id: 'five', used: 42, resetAt: now + 3600000 }] }],
+  };
+  const base = usageSignature(usage, settings, catalog, now);
+
+  const bumped = { agents: [{ ...usage.agents[0], windows: [{ id: 'five', used: 43, resetAt: now + 3600000 }] }] };
+  assert.notEqual(usageSignature(bumped, settings, catalog, now), base);
+
+  const stale = { agents: [{ ...usage.agents[0], stale: true }] };
+  assert.notEqual(usageSignature(stale, settings, catalog, now), base);
+
+  assert.notEqual(usageSignature(usage, settings, catalog, now + 60_000), base);
+  assert.notEqual(usageSignature(usage, { ...settings, density: 'compact' }, catalog, now), base);
+  assert.notEqual(usageSignature(usage, settings, [...catalog, { id: 'kimi', label: 'Kimi Code' }], now), base);
+
+  // config-level repaints: threshold, catalog labels/accents and window labels
+  const thresholded = { ...usage, config: { alertPercent: 40 } };
+  assert.notEqual(usageSignature(thresholded, settings, catalog, now), base);
+  assert.notEqual(usageSignature(usage, settings, [{ id: 'claude', label: 'Claude' }], now), base);
+  const relabeled = { agents: [{ ...usage.agents[0], windows: [{ id: 'five', label: 'Session', used: 42, resetAt: now + 3600000 }] }] };
+  assert.notEqual(usageSignature(relabeled, settings, catalog, now), base);
+});
+
+test('agent signature tracks group quota values and errors', () => {
+  const now = Date.UTC(2026, 7, 6, 12, 0, 0);
+  const agent = {
+    id: 'codex',
+    fetchedAt: now,
+    windows: [],
+    groups: [{ label: 'GPT-5', windows: [{ id: 'five', used: 12, resetAt: now + 1000 }] }],
+  };
+  const base = JSON.stringify(agentSignature(agent));
+  const changed = JSON.stringify(agentSignature({
+    ...agent,
+    groups: [{ label: 'GPT-5', windows: [{ id: 'five', used: 13, resetAt: now + 1000 }] }],
+  }));
+  assert.notEqual(changed, base);
+  assert.notEqual(JSON.stringify(agentSignature({ ...agent, error: 'offline' })), base);
+});
+
+test('first paint shows skeleton placeholders and updates flash with motion-safe CSS', () => {
+  const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+  assert.match(stylesheet, /\.watch\[aria-busy="true"\] \.readouts:empty::before/s);
+  assert.match(stylesheet, /@keyframes skeleton-shimmer/s);
+  assert.match(stylesheet, /\.readout\.is-updated \.quota-ring\s*,\s*\.readout\.is-updated \.group-metric\s*\{[^}]*animation:\s*quota-flash/s);
+  const reducedMotion = stylesheet.match(/@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}\s*@media \(prefers-reduced-transparency/)[1];
+  assert.match(reducedMotion, /\.readout\.is-updated \.quota-ring[\s\S]*?animation:\s*none/s);
 });
