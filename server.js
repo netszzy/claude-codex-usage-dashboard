@@ -55,9 +55,21 @@ const KIMI_USAGE_REFRESH_MS = KIMI_USAGE_REFRESH_SECONDS * 1000;
 const KIMI_USAGE_BRIDGE = String(process.env.KIMI_USAGE_BRIDGE || 'auto').trim().toLowerCase();
 const KIMI_BRIDGE_SCRIPT = path.join(__dirname, 'kimi-usage-snapshot.js');
 const KIMI_BRIDGE_TIMEOUT_MS = 30000;
+const GROK_USAGE_REFRESH_SECONDS = envNumber('GROK_USAGE_REFRESH_SECONDS', 60, {
+  integer: true,
+  min: 15,
+  max: 3600,
+});
+const GROK_USAGE_REFRESH_MS = GROK_USAGE_REFRESH_SECONDS * 1000;
+const GROK_USAGE_BRIDGE = String(process.env.GROK_USAGE_BRIDGE || 'auto').trim().toLowerCase();
+const GROK_BRIDGE_SCRIPT = path.join(__dirname, 'grok-usage-snapshot.js');
+const GROK_BRIDGE_TIMEOUT_MS = 30000;
 
 if (!new Set(['auto', 'off']).has(KIMI_USAGE_BRIDGE)) {
   throw new Error('KIMI_USAGE_BRIDGE must be auto or off');
+}
+if (!new Set(['auto', 'off']).has(GROK_USAGE_BRIDGE)) {
+  throw new Error('GROK_USAGE_BRIDGE must be auto or off');
 }
 const CODEX_SCAN_CHUNK_BYTES = 256 * 1024;
 const CODEX_MAX_LINE_BYTES = 2 * 1024 * 1024;
@@ -96,6 +108,7 @@ const AGENT_PRESETS = Object.freeze([
   { id: 'codex', label: 'Codex', accent: '#67bdb4', defaultVisible: true, source: 'codex-sessions' },
   { id: 'antigravity', label: 'Antigravity', accent: '#9fbd69', defaultVisible: true, source: 'antigravity-grpc' },
   { id: 'kimi', label: 'Kimi Code', accent: '#4e7df0', defaultVisible: false, source: 'local-bridge' },
+  { id: 'grok', label: 'Grok', accent: '#c9a66b', defaultVisible: false, source: 'local-bridge' },
   { id: 'gemini', label: 'Gemini CLI', accent: '#79a9d8', defaultVisible: false, source: 'local-bridge' },
   { id: 'github-copilot', label: 'GitHub Copilot', accent: '#b49ad8', defaultVisible: false, source: 'local-bridge' },
   { id: 'cursor', label: 'Cursor', accent: '#c5b98b', defaultVisible: false, source: 'local-bridge' },
@@ -572,7 +585,7 @@ function getCodexUsage() {
 }
 
 function antigravityLineTimestamp(line, fileTimeMs) {
-  const match = /^.[ ]?(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/.exec(line);
+  const match = /(?:^|:\s*)[IWEF](\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/.exec(line);
   if (!match) return null;
   const year = new Date(fileTimeMs || Date.now()).getFullYear();
   const value = new Date(
@@ -1258,13 +1271,93 @@ function createKimiUsageBridgeRefresher(options = {}) {
   };
 }
 
+function refreshGrokUsageSnapshot(options = {}) {
+  const spawnImpl = options.spawnImpl || spawn;
+  const scriptPath = options.scriptPath || GROK_BRIDGE_SCRIPT;
+  const timeoutMs = options.timeoutMs || GROK_BRIDGE_TIMEOUT_MS;
+  return new Promise((resolve, reject) => {
+    let child = null;
+    let settled = false;
+    let stderrBuffer = '';
+
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch {}
+      if (error) reject(error);
+      else resolve();
+    };
+
+    try {
+      child = spawnImpl(process.execPath, [scriptPath], {
+        cwd: os.homedir(),
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1',
+          NODE_NO_WARNINGS: '1',
+        },
+        shell: false,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    const timer = setTimeout(() => finish(new Error('Grok usage bridge timed out')), timeoutMs);
+    child.on('error', (error) => finish(error));
+    child.on('exit', (code) => {
+      const detail = stderrBuffer.trim().slice(-300);
+      finish(code === 0
+        ? null
+        : new Error(`Grok usage bridge exited with code ${code}${detail ? `: ${detail}` : ''}`));
+    });
+    if (child.stderr) {
+      child.stderr.on('data', (chunk) => {
+        stderrBuffer = `${stderrBuffer}${chunk}`.slice(-1000);
+      });
+    }
+  });
+}
+
+function createGrokUsageBridgeRefresher(options = {}) {
+  const enabled = options.enabled !== undefined ? options.enabled : GROK_USAGE_BRIDGE === 'auto';
+  const refreshMs = options.refreshMs || GROK_USAGE_REFRESH_MS;
+  const warn = options.warn
+    || ((message) => console.warn('[dashboard-server] Grok usage bridge refresh failed:', message));
+  let attemptAt = 0;
+  let promise = null;
+  let lastWarning = null;
+
+  return function refreshGrokUsage(now = Date.now()) {
+    if (!enabled || promise || now - attemptAt < refreshMs) return false;
+    attemptAt = now;
+    promise = refreshGrokUsageSnapshot(options)
+      .catch((error) => {
+        const message = error && error.message ? error.message : String(error);
+        if (message !== lastWarning) {
+          warn(message);
+          lastWarning = message;
+        }
+      })
+      .finally(() => {
+        promise = null;
+      });
+    return true;
+  };
+}
+
 const kimiUsageBridgeRefresh = createKimiUsageBridgeRefresher();
+const grokUsageBridgeRefresh = createGrokUsageBridgeRefresher();
 
 async function defaultUsageProvider() {
   const claude = readClaudeUsage();
   const codex = getCodexUsage();
   const antigravity = await getAntigravityUsage();
   kimiUsageBridgeRefresh();
+  grokUsageBridgeRefresh();
   const coreData = { claude, codex, antigravity };
   const agents = AGENT_PRESETS.slice(0, 3).map((preset) => (
     builtinAgentSnapshot(preset, coreData[preset.id])
@@ -1372,8 +1465,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  antigravityLineTimestamp,
   buildAgentCatalog,
   createDashboardServer,
+  createGrokUsageBridgeRefresher,
   createKimiUsageBridgeRefresher,
   isUsableAntigravityData,
   normalizeCodexAppServerRateLimits,
@@ -1386,6 +1481,7 @@ module.exports = {
   readCodexUsage,
   readExternalAgentSnapshots,
   readLatestCodexSnapshot,
+  refreshGrokUsageSnapshot,
   refreshKimiUsageSnapshot,
   requestHostName,
   resolveCodexExecutable,

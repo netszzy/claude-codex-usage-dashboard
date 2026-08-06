@@ -9,8 +9,9 @@
 - 自动显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
 - 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展三种卡片样式间切换。
 - 悬浮窗按已选 Agent 数量自动调整为 1～3 列并同步改变窗口尺寸。
-- 通过本地额度快照桥接 Kimi Code、Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
+- 通过本地额度快照桥接 Kimi Code、Grok、Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
 - 内置 kimi-usage-snapshot.js，用本机 Kimi Code CLI 登录态读取官方 /usages 接口并写入快照。
+- 内置 grok-usage-snapshot.js，用本机 Grok CLI OAuth 登录态读取官方 billing credits 接口并写入快照。
 - 明确显示服务名、5H/7D 含义、数据年龄以及 LIVE、STALE、OFFLINE 状态。
 - 数据过期后不再把历史重置时间推算成新的未来周期。
 - Codex 默认每 60 秒最多通过本机 app-server 读取一次账户配额，失败时回退到会话文件，并从文件尾部反向分块读取最新 rate_limits。
@@ -29,8 +30,9 @@
 - Antigravity 数据来自本机 Antigravity CLI gRPC 服务；连接失败时保留最后有效值并标记为 stale/offline。
 - Gemini CLI、GitHub Copilot、Cursor、OpenCode 等扩展项来自统一的本地快照目录；看板不会读取这些工具的登录凭据，也不会代替它们访问远程服务。
 - Kimi Code 数据来自 kimi-usage-snapshot.js 通过本机 CLI 的 OAuth 登录态请求官方 /usages 接口；看板服务默认每 60 秒自动运行一次该脚本（KIMI_USAGE_BRIDGE=off 可关闭），凭据只被脚本进程使用。
+- Grok 数据来自 grok-usage-snapshot.js 通过本机 CLI 的 OAuth 登录态请求官方 `/billing?format=credits` 接口；看板服务默认每 60 秒自动运行一次该脚本（GROK_USAGE_BRIDGE=off 可关闭），凭据只被脚本进程使用。
 
-本项目与 Anthropic、OpenAI 或 Google 无隶属关系，也不包含其官方 Logo。
+本项目与 Anthropic、OpenAI、xAI 或 Google 无隶属关系，也不包含其官方 Logo。
 
 ## 要求
 
@@ -77,7 +79,7 @@ Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现�
 %USERPROFILE%\.claude-codex-usage-dashboard\agents
 ~~~
 
-内置文件名为 `kimi.json`、`gemini.json`、`github-copilot.json`、`cursor.json`、`opencode.json`。目录中其他符合 `[a-z0-9][a-z0-9_-]{0,31}.json` 的文件会自动成为自定义 Agent；最多读取 32 个文件，单文件最大 256 KiB。额度百分比统一使用 `0～100`，时间可使用 Unix 毫秒或 ISO 8601。
+内置文件名为 `kimi.json`、`grok.json`、`gemini.json`、`github-copilot.json`、`cursor.json`、`opencode.json`。目录中其他符合 `[a-z0-9][a-z0-9_-]{0,31}.json` 的文件会自动成为自定义 Agent；最多读取 32 个文件，单文件最大 256 KiB。额度百分比统一使用 `0～100`，时间可使用 Unix 毫秒或 ISO 8601。
 
 最小快照示例：
 
@@ -128,6 +130,19 @@ node kimi-usage-snapshot.js --watch  # 脱离看板时每 5 分钟自动刷新
 脚本复用 Kimi Code CLI 的本机 OAuth 登录态（`~/.kimi-code/credentials/kimi-code.json`），请求与 CLI `/usage` 命令同源的官方 `GET /usages` 接口。只有额度百分比和重置时间会写入快照；访问令牌不会进入快照、日志或看板服务。访问令牌约 15 分钟过期，脚本会自动用凭据里的 refresh_token 续期并原子回写凭据文件（带文件锁避免与 CLI 同时刷新竞争）；只有 refresh_token 本身被服务端拒绝时才需要重新 /login。单次刷新失败时保留最后一份有效快照，没有有效快照时才写入错误占位。也可以用 `KIMI_USAGE_TOKEN` 环境变量直接提供 Kimi Code Console 签发的 API Key，跳过 OAuth 文件。
 
 日常使用时，把单次模式挂到 Windows 任务计划程序，或让 `--watch` 模式随看板一起启动即可。
+
+## Grok 额度桥接
+
+Grok / SuperGrok 的周期额度（通常为周额度）由随附脚本写入 `grok.json`。看板运行期间，服务默认每 60 秒自动运行一次桥接脚本：
+
+~~~powershell
+node grok-usage-snapshot.js          # 手动单次刷新
+node grok-usage-snapshot.js --watch  # 脱离看板时每 5 分钟自动刷新
+~~~
+
+脚本复用 Grok CLI 的本机 OAuth 登录态（`~/.grok/auth.json`），请求与 CLI `/usage` 命令同源的官方 `GET /billing?format=credits` 接口（默认 `https://cli-chat-proxy.grok.com/v1`）。快照只写入总体 `creditUsagePercent` 与周期结束时间；访问令牌不会进入快照、日志或看板服务。令牌过期时脚本会用 refresh_token 向 `auth.x.ai` 续期并原子回写 `auth.json`（带文件锁避免与 CLI 竞争）。单次刷新失败时保留最后一份有效快照。也可以用 `GROK_USAGE_TOKEN`（或 `XAI_API_KEY`）直接提供令牌；注意 billing 接口通常需要 grok.com OAuth 会话，纯 API Key 可能无法读取额度。
+
+在看板配置面板中勾选 **Grok** 即可显示；默认不勾选，与其他 local-bridge 预设一致。
 
 ## Claude statusLine 配置
 
@@ -209,6 +224,19 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | KIMI_USAGE_STALE_MINUTES | 30 | Kimi 快照过期阈值 |
 | KIMI_USAGE_SNAPSHOT | AGENT_USAGE_DIR/kimi.json | Kimi 快照输出路径 |
 | KIMI_USAGE_LABEL | Kimi Code | Kimi 卡片显示名称 |
+| GROK_HOME | ~/.grok | Grok CLI 的数据目录 |
+| GROK_AUTH_PATH | GROK_HOME/auth.json | Grok OAuth 凭据路径 |
+| GROK_USAGE_TOKEN | 空 | 直接使用访问令牌，跳过 auth.json |
+| XAI_API_KEY | 空 | 与 GROK_USAGE_TOKEN 相同的后备令牌 |
+| GROK_USAGE_BASE_URL | https://cli-chat-proxy.grok.com/v1 | Grok billing API 地址 |
+| GROK_OAUTH_TOKEN_URL | https://auth.x.ai/oauth2/token | Grok OAuth 续期端点 |
+| GROK_OAUTH_CLIENT_ID | Grok CLI 官方 client_id | OAuth 续期使用的 client_id |
+| GROK_USAGE_TIMEOUT_SECONDS | 8 | 单次 billing 请求超时，范围 3～60 秒 |
+| GROK_USAGE_BRIDGE | auto | auto 时看板服务按固定间隔自动运行桥接脚本；off 完全手动 |
+| GROK_USAGE_REFRESH_SECONDS | 60（服务端）/ 300（--watch） | Grok 额度刷新间隔，范围 15～3600 秒 |
+| GROK_USAGE_STALE_MINUTES | 30 | Grok 快照过期阈值 |
+| GROK_USAGE_SNAPSHOT | AGENT_USAGE_DIR/grok.json | Grok 快照输出路径 |
+| GROK_USAGE_LABEL | Grok | Grok 卡片显示名称 |
 
 示例：
 

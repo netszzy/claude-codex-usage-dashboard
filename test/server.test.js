@@ -9,6 +9,7 @@ const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 
 const {
+  antigravityLineTimestamp,
   buildAgentCatalog,
   isUsableAntigravityData,
   normalizeAgentSnapshot,
@@ -201,11 +202,13 @@ test('local HTTP routes enforce host, method, route, and CSP boundaries', async 
 
 
 const {
+  createGrokUsageBridgeRefresher,
   createKimiUsageBridgeRefresher,
+  refreshGrokUsageSnapshot,
   refreshKimiUsageSnapshot,
 } = require('../server');
 
-function fakeKimiBridgeSpawn({ code = 0, stderr = '' } = {}) {
+function fakeUsageBridgeSpawn({ code = 0, stderr = '' } = {}) {
   const calls = [];
   const spawnImpl = (executable, args, options) => {
     const child = new EventEmitter();
@@ -225,7 +228,7 @@ function fakeKimiBridgeSpawn({ code = 0, stderr = '' } = {}) {
 }
 
 test('Kimi usage bridge spawn runs the snapshot script as plain node', async () => {
-  const { calls, spawnImpl } = fakeKimiBridgeSpawn();
+  const { calls, spawnImpl } = fakeUsageBridgeSpawn();
   await refreshKimiUsageSnapshot({ spawnImpl, scriptPath: 'bridge.js', timeoutMs: 1000 });
 
   assert.equal(calls.length, 1);
@@ -237,7 +240,7 @@ test('Kimi usage bridge spawn runs the snapshot script as plain node', async () 
 });
 
 test('Kimi usage bridge spawn surfaces stderr on failure', async () => {
-  const { spawnImpl } = fakeKimiBridgeSpawn({ code: 1, stderr: 'boom' });
+  const { spawnImpl } = fakeUsageBridgeSpawn({ code: 1, stderr: 'boom' });
   await assert.rejects(
     refreshKimiUsageSnapshot({ spawnImpl, scriptPath: 'bridge.js', timeoutMs: 1000 }),
     /boom/,
@@ -245,7 +248,7 @@ test('Kimi usage bridge spawn surfaces stderr on failure', async () => {
 });
 
 test('Kimi usage bridge refresher throttles spawns and warns once per failure', async () => {
-  const { calls, spawnImpl } = fakeKimiBridgeSpawn({ code: 1, stderr: 'denied' });
+  const { calls, spawnImpl } = fakeUsageBridgeSpawn({ code: 1, stderr: 'denied' });
   const warnings = [];
   const refresh = createKimiUsageBridgeRefresher({
     enabled: true,
@@ -273,3 +276,78 @@ test('Kimi usage bridge refresher throttles spawns and warns once per failure', 
   assert.equal(disabled(), false);
   assert.equal(calls.length, 2);
 });
+
+test('Grok usage bridge spawn runs the snapshot script as plain node', async () => {
+  const { calls, spawnImpl } = fakeUsageBridgeSpawn();
+  await refreshGrokUsageSnapshot({ spawnImpl, scriptPath: 'grok-bridge.js', timeoutMs: 1000 });
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].executable, process.execPath);
+  assert.deepEqual(calls[0].args, ['grok-bridge.js']);
+  assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(calls[0].options.shell, false);
+  assert.equal(calls[0].options.windowsHide, true);
+});
+
+test('Grok usage bridge spawn surfaces stderr on failure', async () => {
+  const { spawnImpl } = fakeUsageBridgeSpawn({ code: 1, stderr: 'billing denied' });
+  await assert.rejects(
+    refreshGrokUsageSnapshot({ spawnImpl, scriptPath: 'grok-bridge.js', timeoutMs: 1000 }),
+    /billing denied/,
+  );
+});
+
+test('Grok usage bridge refresher throttles spawns and warns once per failure', async () => {
+  const { calls, spawnImpl } = fakeUsageBridgeSpawn({ code: 1, stderr: 'no auth' });
+  const warnings = [];
+  const refresh = createGrokUsageBridgeRefresher({
+    enabled: true,
+    refreshMs: 1000,
+    spawnImpl,
+    scriptPath: 'grok-bridge.js',
+    timeoutMs: 1000,
+    warn: (message) => warnings.push(message),
+  });
+  const start = Date.now();
+
+  assert.equal(refresh(start), true);
+  assert.equal(refresh(start + 10), false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refresh(start + 500), false);
+  assert.equal(refresh(start + 1001), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls.length, 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /no auth/);
+
+  const disabled = createGrokUsageBridgeRefresher({ enabled: false, spawnImpl });
+  assert.equal(disabled(), false);
+  assert.equal(calls.length, 2);
+});
+
+test('agent catalog includes Grok as a local-bridge preset', () => {
+  const catalog = buildAgentCatalog([]);
+  const grok = catalog.find((agent) => agent.id === 'grok');
+  assert.ok(grok);
+  assert.equal(grok.label, 'Grok');
+  assert.equal(grok.source, 'local-bridge');
+  assert.equal(grok.defaultVisible, false);
+  assert.equal(grok.bridgeFile, 'grok.json');
+  assert.equal(grok.available, false);
+});
+
+test('antigravityLineTimestamp parses standard and prefixed log line timestamps', () => {
+  const fileTime = new Date('2026-08-02T14:39:23Z').getTime();
+  const standardLine = 'I0802 14:39:23.601498      82 server.go:560] Language server listening on random port at 3428 for HTTPS (gRPC)';
+  const prefixedLine = 'ERROR: logging before google.Init: I0802 14:39:23.601498      82 server.go:560] Language server listening on random port at 3428 for HTTPS (gRPC)';
+
+  const tsStandard = antigravityLineTimestamp(standardLine, fileTime);
+  const tsPrefixed = antigravityLineTimestamp(prefixedLine, fileTime);
+
+  assert.ok(tsStandard);
+  assert.ok(tsPrefixed);
+  assert.equal(tsStandard, tsPrefixed);
+});
+
