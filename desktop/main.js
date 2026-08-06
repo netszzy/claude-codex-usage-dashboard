@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, MenuItem, Tray, ipcMain, nativeImage, screen }
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { clampBoundsToArea, resizeBoundsFromBottomRight } = require('./window-bounds');
 
 app.setName('Usage Watch');
 
@@ -60,6 +61,12 @@ let lastServerError = '';
 const DEFAULT_WIDTH = 380;
 const DEFAULT_HEIGHT = 224;
 const MIN_HUD_WIDTH = 240;
+
+// Fractional display scaling can make window.getBounds() report a width/height
+// that drifts from what was actually requested. Track the intended size ourselves
+// instead of round-tripping through getBounds(), so that drift never compounds
+// across repeated setBounds calls (e.g. during a drag).
+let hudSize = { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -154,35 +161,59 @@ function saveWindowState(bounds) {
 
 function clampToScreen(bounds) {
   const display = screen.getDisplayMatching(bounds) || screen.getPrimaryDisplay();
-  const area = display.workArea;
-  return {
-    x: Math.min(Math.max(area.x, bounds.x), Math.max(area.x, area.width + area.x - bounds.width)),
-    y: Math.min(Math.max(area.y, bounds.y), Math.max(area.y, area.height + area.y - bounds.height)),
-    width: bounds.width,
-    height: bounds.height,
-  };
+  return clampBoundsToArea(bounds, display.workArea);
+}
+
+function keepWindowInWorkArea(window) {
+  if (isQuitting || !window || window.isDestroyed()) return;
+  const current = { ...window.getBounds(), width: hudSize.width, height: hudSize.height };
+  const next = clampToScreen(current);
+  if (
+    current.x === next.x
+    && current.y === next.y
+    && current.width === next.width
+    && current.height === next.height
+  ) {
+    return;
+  }
+  dragState = null;
+  hudSize = { width: next.width, height: next.height };
+  window.setBounds(next);
+  saveWindowState(next);
+}
+
+function bindDisplayEvents() {
+  const keepMainWindowInWorkArea = () => keepWindowInWorkArea(mainWindow);
+  screen.on('display-metrics-changed', keepMainWindowInWorkArea);
+  screen.on('display-removed', keepMainWindowInWorkArea);
+  app.once('will-quit', () => {
+    screen.off('display-metrics-changed', keepMainWindowInWorkArea);
+    screen.off('display-removed', keepMainWindowInWorkArea);
+  });
 }
 
 function buildInitialWindowBounds() {
   ensureStateDir();
   const saved = loadWindowState();
   const area = screen.getPrimaryDisplay().workArea;
-  if (saved) {
-    isAlwaysOnTop = saved.alwaysOnTop !== false;
-    return clampToScreen({
-      x: saved.x,
-      y: saved.y,
+  const bounds = saved
+    ? (() => {
+      isAlwaysOnTop = saved.alwaysOnTop !== false;
+      return clampToScreen({
+        x: saved.x,
+        y: saved.y,
+        width: DEFAULT_WIDTH,
+        height: DEFAULT_HEIGHT,
+      });
+    })()
+    : clampBoundsToArea({
+      x: Math.floor(area.x + area.width - DEFAULT_WIDTH - 24),
+      y: Math.floor(area.y + area.height - DEFAULT_HEIGHT - 24),
       width: DEFAULT_WIDTH,
       height: DEFAULT_HEIGHT,
-    });
-  }
-
-  return {
-    x: Math.floor(area.x + area.width - DEFAULT_WIDTH - 24),
-    y: Math.floor(area.y + area.height - DEFAULT_HEIGHT - 24),
-    width: DEFAULT_WIDTH,
-    height: DEFAULT_HEIGHT,
-  };
+    }, area);
+  hudSize = { width: bounds.width, height: bounds.height };
+  return bounds;
 }
 
 async function detectServerRunning() {
@@ -274,11 +305,13 @@ function bindDragIpc() {
     const startX = Number(point.x);
     const startY = Number(point.y);
     if (!Number.isFinite(startX) || !Number.isFinite(startY)) return;
+    const bounds = window.getBounds();
     dragState = {
       window,
       startX,
       startY,
-      bounds: window.getBounds(),
+      originX: bounds.x,
+      originY: bounds.y,
     };
   });
 
@@ -288,16 +321,19 @@ function bindDragIpc() {
     const nextY = Number(point.y);
     if (!Number.isFinite(nextX) || !Number.isFinite(nextY)) return;
     dragState.window.setBounds({
-      ...dragState.bounds,
-      x: Math.round(dragState.bounds.x + nextX - dragState.startX),
-      y: Math.round(dragState.bounds.y + nextY - dragState.startY),
+      x: Math.round(dragState.originX + nextX - dragState.startX),
+      y: Math.round(dragState.originY + nextY - dragState.startY),
+      width: hudSize.width,
+      height: hudSize.height,
     });
   });
 
   ipcMain.on('hud-drag-end', (event) => {
     if (!dragState || event.sender !== dragState.window.webContents) return;
     if (dragState && dragState.window && !dragState.window.isDestroyed()) {
-      saveWindowState(dragState.window.getBounds());
+      const raw = dragState.window.getBounds();
+      const bounds = { ...raw, width: hudSize.width, height: hudSize.height };
+      saveWindowState(bounds);
     }
     dragState = null;
   });
@@ -308,14 +344,18 @@ function bindDragIpc() {
     const height = Math.round(Number(size.height));
     if (!Number.isFinite(width) || !Number.isFinite(height)) return;
     if (width < MIN_HUD_WIDTH || width > 640 || height < 120 || height > 640) return;
-    const current = mainWindow.getBounds();
-    if (current.width === width && current.height === height) return;
-    const bounds = clampToScreen({
-      x: current.x + current.width - width,
-      y: current.y,
-      width,
-      height,
-    });
+    const current = { ...mainWindow.getBounds(), width: hudSize.width, height: hudSize.height };
+    const display = screen.getDisplayMatching(current) || screen.getPrimaryDisplay();
+    const bounds = resizeBoundsFromBottomRight(current, { width, height }, display.workArea);
+    if (
+      current.x === bounds.x
+      && current.y === bounds.y
+      && current.width === bounds.width
+      && current.height === bounds.height
+    ) {
+      return;
+    }
+    hudSize = { width: bounds.width, height: bounds.height };
     mainWindow.setBounds(bounds);
     saveWindowState(bounds);
   });
@@ -495,6 +535,7 @@ function revealWindow(window) {
   if (window.isMinimized()) {
     window.restore();
   }
+  keepWindowInWorkArea(window);
   window.setSkipTaskbar(true);
   if (isAlwaysOnTop) {
     window.setAlwaysOnTop(true, 'screen-saver');
@@ -524,7 +565,7 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      backgroundThrottling: false,
+      backgroundThrottling: true,
       preload: path.join(__dirname, 'preload.js'),
     },
     title: 'Claude / Codex Usage Dashboard',
@@ -605,6 +646,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     try {
       bindDragIpc();
+      bindDisplayEvents();
       ensureTray();
       await createWindow();
     } catch (error) {
