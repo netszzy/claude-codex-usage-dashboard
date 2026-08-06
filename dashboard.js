@@ -12,6 +12,7 @@ const LEGACY_AGENTS = [
 ];
 
 let latestUsage = null;
+let lastGoodUsage = null;
 let currentCatalog = LEGACY_AGENTS;
 let currentSettings = null;
 let settingsOpen = false;
@@ -71,12 +72,41 @@ function hasUsageData(data) {
 
 function serviceState(data, now = Date.now()) {
   if (!data || !hasUsageData(data)) {
-    return { label: data && data.error ? 'offline' : 'no data', kind: 'error' };
+    return data && data.error
+      ? { label: 'offline', kind: 'error' }
+      : { label: 'waiting', kind: 'idle' };
   }
   const age = ageText(data.fetchedAt, now);
   if (data.error) return { label: `offline ${age}`, kind: 'error' };
   if (data.stale) return { label: `stale ${age}`, kind: 'stale' };
   return { label: `live ${age}`, kind: 'live' };
+}
+
+function overallState(states) {
+  if (!states.length) return { label: 'no agents', kind: 'idle' };
+  const activeStates = states.filter((state) => state.kind !== 'idle');
+  if (!activeStates.length) return { label: 'waiting', kind: 'idle' };
+  const hasError = activeStates.some((state) => state.kind === 'error');
+  const hasStale = activeStates.some((state) => state.kind === 'stale');
+  if (hasError) {
+    return {
+      label: activeStates.every((state) => state.kind === 'error') ? 'offline' : 'degraded',
+      kind: 'error',
+    };
+  }
+  if (hasStale) return { label: 'stale data', kind: 'stale' };
+  return { label: 'live', kind: 'live' };
+}
+
+function choiceState(data, now = Date.now()) {
+  const state = serviceState(data, now);
+  const labels = {
+    idle: '等待快照',
+    live: '已连接',
+    stale: '数据过期',
+    error: '离线',
+  };
+  return { label: labels[state.kind], kind: state.kind };
 }
 
 function normalizeSettings(raw, catalog = LEGACY_AGENTS) {
@@ -125,6 +155,65 @@ function agentsFromUsage(usage) {
       { id: 'seven', label: '7D', ...((usage && usage[metadata.id] && usage[metadata.id].seven) || {}) },
     ],
   }));
+}
+
+function offlineUsage(usage, catalog, error) {
+  const base = usage && typeof usage === 'object' ? usage : {};
+  const message = error && error.message ? error.message : 'Dashboard service offline';
+  const byId = new Map(agentsFromUsage(base).map((agent) => [agent.id, agent]));
+  const agents = catalog.map((metadata) => {
+    const previous = byId.get(metadata.id);
+    if (previous && hasUsageData(previous)) {
+      return { ...previous, stale: true, error: message };
+    }
+    return {
+      ...metadata,
+      fetchedAt: null,
+      stale: true,
+      error: message,
+      windows: [],
+      groups: [],
+    };
+  });
+  return {
+    ...base,
+    config: {
+      ...(base.config && typeof base.config === 'object' ? base.config : {}),
+      agents: catalog,
+    },
+    agents,
+  };
+}
+
+function createUsageRefresher(loadUsage, onUsage, onError) {
+  let inFlight = null;
+  return function refresh() {
+    if (inFlight) return inFlight;
+    inFlight = (async () => {
+      try {
+        const usage = await loadUsage();
+        onUsage(usage);
+        return true;
+      } catch (error) {
+        onError(error);
+        return false;
+      } finally {
+        inFlight = null;
+      }
+    })();
+    return inFlight;
+  };
+}
+
+function installUsagePolling(refresh, pageDocument = document, setIntervalFn = setInterval) {
+  const refreshWhenVisible = () => {
+    if (pageDocument.visibilityState !== 'visible') return false;
+    refresh();
+    return true;
+  };
+  setIntervalFn(refreshWhenVisible, 5000);
+  pageDocument.addEventListener('visibilitychange', refreshWhenVisible);
+  return refreshWhenVisible;
 }
 
 function element(tagName, className, text) {
@@ -242,19 +331,7 @@ function renderAgentCard(agent, metadata, alertPercent, now) {
 function renderOverall(states) {
   const overall = document.getElementById('overall_state');
   if (!overall) return;
-  let label;
-  let kind;
-  if (!states.length) {
-    label = 'no agents';
-    kind = 'stale';
-  } else {
-    const hasError = states.some((state) => state.kind === 'error');
-    const hasStale = states.some((state) => state.kind === 'stale');
-    kind = hasError ? 'error' : hasStale ? 'stale' : 'live';
-    label = hasError && states.every((state) => state.kind === 'error')
-      ? 'offline'
-      : hasError ? 'degraded' : hasStale ? 'stale data' : 'live';
-  }
+  const { label, kind } = overallState(states);
   const className = `overall-state is-${kind}`;
   if (overall.className !== className) overall.className = className;
   if (overall.textContent !== label) overall.textContent = label;
@@ -379,31 +456,30 @@ function renderUsage(usage, now = Date.now()) {
   const emptyState = document.getElementById('empty_state');
   emptyState.hidden = cards.length > 0;
   renderOverall(states);
-  renderSettingsChoices();
+  renderSettingsChoices(now);
   applyLayout(cards.length);
   const dashboard = document.getElementById('dashboard');
   dashboard.setAttribute('aria-busy', 'false');
 }
 
 function renderOffline(error) {
-  const data = { stale: true, error: error && error.message ? error.message : 'Dashboard service offline' };
-  renderUsage({
-    config: { agents: currentCatalog },
-    agents: currentCatalog.map((agent) => ({ ...agent, ...data, windows: [], groups: [] })),
-  });
+  renderUsage(offlineUsage(lastGoodUsage, currentCatalog, error));
 }
 
-async function refreshUsage() {
-  try {
+const refreshUsage = createUsageRefresher(
+  async () => {
     const response = await fetch('/api/usage', { cache: 'no-store' });
     if (!response.ok) throw new Error(`Usage API returned ${response.status}`);
-    renderUsage(await response.json());
-  } catch (error) {
-    renderOffline(error);
-  }
-}
+    return response.json();
+  },
+  (usage) => {
+    lastGoodUsage = usage;
+    renderUsage(usage);
+  },
+  renderOffline,
+);
 
-function renderSettingsChoices() {
+function renderSettingsChoices(now = Date.now()) {
   const choices = document.getElementById('agent_choices');
   if (!choices || !currentSettings) return;
   const panel = document.getElementById('settings_panel');
@@ -411,6 +487,7 @@ function renderSettingsChoices() {
   const activeChoice = settingsOpen && document.activeElement && document.activeElement.matches('.agent-choice input')
     ? document.activeElement.value
     : null;
+  const agentDataById = new Map(agentsFromUsage(latestUsage || {}).map((agent) => [agent.id, agent]));
   const selected = new Set(currentSettings.visibleAgents);
   const nodes = currentCatalog.map((agent) => {
     const label = element('label', 'agent-choice');
@@ -429,7 +506,8 @@ function renderSettingsChoices() {
     });
     const copy = element('span', 'choice-copy');
     const name = element('strong', '', agent.label);
-    const status = element('span', agent.available ? 'is-connected' : '', agent.available ? '已连接' : '等待快照');
+    const connection = choiceState(agentDataById.get(agent.id), now);
+    const status = element('span', `is-${connection.kind}`, connection.label);
     copy.append(name, status);
     label.append(input, copy);
     return label;
@@ -573,16 +651,18 @@ function init() {
   installDesktopDrag();
   installSettings();
   refreshUsage();
-  setInterval(refreshUsage, 5000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') refreshUsage();
-  });
+  installUsagePolling(refreshUsage);
 }
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     ageText,
+    choiceState,
+    createUsageRefresher,
+    installUsagePolling,
     normalizeSettings,
+    offlineUsage,
+    overallState,
     percentValue,
     quotaLevel,
     quotaTitle,

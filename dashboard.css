@@ -18,6 +18,7 @@
   --live: #32d74b;
   --warning: #ffd60a;
   --alert: #ff453a;
+  --alert-text: #ff817a;
   --focus: #64d2ff;
   --shadow: rgba(0, 0, 0, 0.42);
   --spring: cubic-bezier(0.22, 1, 0.36, 1);
@@ -394,7 +395,7 @@ label:has(input:focus-visible) {
 }
 
 .state.is-error {
-  color: var(--alert);
+  color: var(--alert-text);
 }
 
 .quota-grid {
@@ -496,7 +497,7 @@ label:has(input:focus-visible) {
 }
 
 .quota-value.is-alert {
-  color: var(--alert);
+  color: var(--alert-text);
 }
 
 .reset-text {
@@ -845,8 +846,16 @@ label:has(input:focus-visible) {
   font-size: 9px;
 }
 
-.choice-copy span.is-connected {
+.choice-copy span.is-live {
   color: var(--live);
+}
+
+.choice-copy span.is-stale {
+  color: var(--warning);
+}
+
+.choice-copy span.is-error {
+  color: var(--alert-text);
 }
 
 .density-choices {
@@ -1076,6 +1085,7 @@ body.desktop-shell .watch.is-settings-open {
     --live: #248a3d;
     --warning: #b26a00;
     --alert: #d70015;
+    --alert-text: #c30f1f;
     --focus: #007aff;
     --shadow: rgba(65, 70, 82, 0.2);
   }
@@ -1183,6 +1193,7 @@ body.desktop-shell .watch.is-settings-open {
     --live: Highlight;
     --warning: Highlight;
     --alert: Highlight;
+    --alert-text: Highlight;
   }
 
   .watch,

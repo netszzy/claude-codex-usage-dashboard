@@ -7,7 +7,12 @@ const path = require('node:path');
 
 const {
   ageText,
+  choiceState,
+  createUsageRefresher,
+  installUsagePolling,
   normalizeSettings,
+  offlineUsage,
+  overallState,
   quotaLevel,
   quotaTitle,
   resetText,
@@ -37,7 +42,135 @@ test('service freshness remains visible in the rendered state model', () => {
 
   const offline = serviceState({ five: { used: 10 }, stale: true, fetchedAt: now, error: 'offline' }, now);
   assert.deepEqual(offline, { label: 'offline now', kind: 'error' });
+  assert.deepEqual(serviceState({ windows: [] }, now), { label: 'waiting', kind: 'idle' });
+  assert.deepEqual(serviceState({ windows: [], error: 'offline' }, now), { label: 'offline', kind: 'error' });
   assert.equal(ageText(null, now), 'unknown age');
+});
+
+test('waiting agents stay neutral while active agents determine the overall state', () => {
+  const waiting = { label: 'waiting', kind: 'idle' };
+  const live = { label: 'live now', kind: 'live' };
+  const stale = { label: 'stale 1h', kind: 'stale' };
+  const offline = { label: 'offline now', kind: 'error' };
+
+  assert.deepEqual(overallState([]), { label: 'no agents', kind: 'idle' });
+  assert.deepEqual(overallState([waiting]), { label: 'waiting', kind: 'idle' });
+  assert.deepEqual(overallState([live, waiting]), { label: 'live', kind: 'live' });
+  assert.deepEqual(overallState([stale, waiting]), { label: 'stale data', kind: 'stale' });
+  assert.deepEqual(overallState([offline, waiting]), { label: 'offline', kind: 'error' });
+  assert.deepEqual(overallState([live, offline, waiting]), { label: 'degraded', kind: 'error' });
+});
+
+test('settings choices reflect current freshness instead of historical availability', () => {
+  const now = Date.UTC(2026, 6, 10, 12, 0, 0);
+  assert.deepEqual(choiceState({ windows: [] }, now), { label: '等待快照', kind: 'idle' });
+  assert.deepEqual(choiceState({ five: { used: 10 }, fetchedAt: now }, now), {
+    label: '已连接',
+    kind: 'live',
+  });
+  assert.deepEqual(choiceState({ five: { used: 10 }, fetchedAt: now, stale: true }, now), {
+    label: '数据过期',
+    kind: 'stale',
+  });
+  assert.deepEqual(choiceState({ five: { used: 10 }, fetchedAt: now, error: 'offline' }, now), {
+    label: '离线',
+    kind: 'error',
+  });
+});
+
+test('offline rendering preserves last-good quota data', () => {
+  const usage = {
+    config: {
+      alertPercent: 90,
+      agents: [{ id: 'codex', label: 'Codex', defaultVisible: true }],
+    },
+    agents: [{
+      id: 'codex',
+      label: 'Codex',
+      fetchedAt: 1234,
+      windows: [{ id: 'seven', used: 42, resetAt: 5678 }],
+      groups: [],
+    }],
+  };
+  const result = offlineUsage(usage, usage.config.agents, new Error('temporary failure'));
+
+  assert.equal(result.config.alertPercent, 90);
+  assert.deepEqual(result.agents[0].windows, usage.agents[0].windows);
+  assert.equal(result.agents[0].fetchedAt, 1234);
+  assert.equal(result.agents[0].stale, true);
+  assert.equal(result.agents[0].error, 'temporary failure');
+});
+
+test('overlapping refresh triggers share one request and retry after it settles', async () => {
+  function deferred() {
+    let resolve;
+    const promise = new Promise((resolvePromise) => {
+      resolve = resolvePromise;
+    });
+    return { promise, resolve };
+  }
+
+  const first = deferred();
+  const second = deferred();
+  const requests = [first, second];
+  const events = [];
+  let loadCount = 0;
+  const refresh = createUsageRefresher(
+    () => {
+      loadCount += 1;
+      return requests.shift().promise;
+    },
+    (usage) => events.push(['usage', usage.id]),
+    (error) => events.push(['error', error.message]),
+  );
+
+  const initialRefresh = refresh();
+  const overlappingRefresh = refresh();
+  assert.equal(overlappingRefresh, initialRefresh);
+  assert.equal(loadCount, 1);
+
+  first.resolve({ id: 'first' });
+  assert.equal(await initialRefresh, true);
+  assert.deepEqual(events, [['usage', 'first']]);
+
+  const nextRefresh = refresh();
+  assert.equal(loadCount, 2);
+  second.resolve({ id: 'second' });
+  assert.equal(await nextRefresh, true);
+  assert.deepEqual(events, [['usage', 'first'], ['usage', 'second']]);
+});
+
+test('usage polling pauses while the page is hidden and refreshes as soon as it is visible', () => {
+  const listeners = new Map();
+  let intervalCallback = null;
+  let intervalMs = null;
+  let refreshCount = 0;
+  const pageDocument = {
+    visibilityState: 'hidden',
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+  };
+  const refreshWhenVisible = installUsagePolling(
+    () => {
+      refreshCount += 1;
+    },
+    pageDocument,
+    (callback, delay) => {
+      intervalCallback = callback;
+      intervalMs = delay;
+    },
+  );
+
+  assert.equal(intervalMs, 5000);
+  assert.equal(intervalCallback(), false);
+  assert.equal(refreshCount, 0);
+
+  pageDocument.visibilityState = 'visible';
+  assert.equal(listeners.get('visibilitychange')(), true);
+  assert.equal(refreshCount, 1);
+  assert.equal(refreshWhenVisible(), true);
+  assert.equal(refreshCount, 2);
 });
 
 test('dashboard settings keep valid selections and fall back to configured defaults', () => {
@@ -225,4 +358,27 @@ test('grouped agent cards render individual reset countdowns for each group wind
 test('quota tooltips report the label, percentage and countdown as text', () => {
   assert.equal(quotaTitle('5H', 42, '3h 20m'), '5H 42%, reset 3h 20m');
   assert.equal(quotaTitle('7D', null, 'no reset'), '7D --, reset no reset');
+});
+
+test('alert text keeps readable contrast without changing the progress accent', () => {
+  const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+  const darkText = stylesheet.match(/:root\s*\{[\s\S]*?--alert-text:\s*(#[0-9a-f]{6})/i)[1];
+  const lightBlock = stylesheet.match(/@media \(prefers-color-scheme: light\)\s*\{\s*:root\s*\{([\s\S]*?)\n\s*\}/)[1];
+  const lightText = lightBlock.match(/--alert-text:\s*(#[0-9a-f]{6})/i)[1];
+  const luminance = (hex) => {
+    const channels = [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16) / 255);
+    const linear = channels.map((channel) => (
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+    ));
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  };
+  const contrast = (left, right) => {
+    const values = [luminance(left), luminance(right)].sort((a, b) => b - a);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+  };
+
+  assert.ok(contrast(darkText, '#3a3a3e') >= 4.5);
+  assert.ok(contrast(lightText, '#ffffff') >= 4.5);
+  assert.match(stylesheet, /\.quota-value\.is-alert\s*\{[^}]*color:\s*var\(--alert-text\)/s);
+  assert.match(stylesheet, /\.quota\.is-alert\s*\{[^}]*--quota-color:\s*var\(--alert\)/s);
 });
