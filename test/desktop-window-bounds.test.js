@@ -53,6 +53,18 @@ test('HUD resize keeps its bottom-right anchor and restores it after a round tri
   assert.deepEqual(restored, current);
 });
 
+test('wide strip resize fills the available display width at its compact height', () => {
+  const current = { x: 1516, y: 792, width: 380, height: 224 };
+  const resized = resizeBoundsFromBottomRight(
+    current,
+    { width: 32768, height: 48 },
+    { x: 0, y: 0, width: 1920, height: 1040 },
+  );
+
+  assert.deepEqual(resized, { x: 0, y: 968, width: 1920, height: 48 });
+  assert.equal(resized.y + resized.height, current.y + current.height);
+});
+
 test('desktop shell re-clamps the current window when display geometry changes', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'main.js'), 'utf8');
   assert.match(source, /const display = screen\.getDisplayMatching\(current\) \|\| screen\.getPrimaryDisplay\(\)/);
@@ -63,4 +75,13 @@ test('desktop shell re-clamps the current window when display geometry changes',
   assert.match(source, /app\.whenReady\(\)\.then\([\s\S]*bindDisplayEvents\(\)/);
   assert.match(source, /function revealWindow\(window\) \{[\s\S]*keepWindowInWorkArea\(window\)/);
   assert.match(source, /backgroundThrottling:\s*true/);
+});
+
+test('desktop resize accepts full-width strip requests while retaining safe limits', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'main.js'), 'utf8');
+
+  assert.match(source, /const MAX_HUD_WIDTH = 32768;/);
+  assert.match(source, /const MIN_HUD_HEIGHT = 48;/);
+  assert.match(source, /width < MIN_HUD_WIDTH \|\| width > MAX_HUD_WIDTH/);
+  assert.match(source, /height < MIN_HUD_HEIGHT \|\| height > MAX_HUD_HEIGHT/);
 });

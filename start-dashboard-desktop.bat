@@ -2,6 +2,14 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
+for %%F in ("%~dp0release\AI-Usage-Dashboard-*-portable.exe") do (
+  if exist "%%~fF" (
+    echo Starting packaged AI Usage Dashboard...
+    start "" "%%~fF"
+    exit /b 0
+  )
+)
+
 if not exist node_modules (
   echo [Missing] npm dependencies not installed. Run:
   echo   npm install

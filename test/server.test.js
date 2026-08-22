@@ -11,16 +11,12 @@ const { PassThrough } = require('stream');
 const {
   antigravityLineTimestamp,
   buildAgentCatalog,
-  isUsableAntigravityData,
   normalizeAgentSnapshot,
   normalizeCodexAppServerRateLimits,
   normalizeCodexRateLimits,
-  parseCodexEventLine,
   queryCodexAppServerRateLimits,
   readExternalAgentSnapshots,
   readLatestCodexSnapshot,
-  requestHostName,
-  writeJsonAtomic,
 } = require('../server');
 
 function fakeCodexAppServerSpawn(onSpawn) {

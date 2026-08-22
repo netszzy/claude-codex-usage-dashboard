@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { writeJsonAtomic } = require('./lib/atomic-json');
 
 const useFanout = process.argv.includes('--fanout');
 const settingsPath = process.env.CLAUDE_SETTINGS_PATH
@@ -36,24 +37,6 @@ function backupFile(filePath) {
   const backupPath = backupPathFor(filePath);
   fs.copyFileSync(filePath, backupPath, fs.constants.COPYFILE_EXCL);
   return backupPath;
-}
-
-function writeJsonAtomic(filePath, value) {
-  const directory = path.dirname(filePath);
-  const temporaryPath = path.join(
-    directory,
-    '.' + path.basename(filePath) + '.' + process.pid + '.' + Date.now() + '.tmp',
-  );
-  fs.mkdirSync(directory, { recursive: true });
-  try {
-    fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2) + '\n', 'utf8');
-    fs.renameSync(temporaryPath, filePath);
-  } catch (error) {
-    try {
-      fs.unlinkSync(temporaryPath);
-    } catch {}
-    throw error;
-  }
 }
 
 function isDashboardStatusline(command) {
@@ -102,7 +85,7 @@ function main() {
       console.log('Backed up existing fanout config to:');
       console.log('  ' + configBackup);
     }
-    writeJsonAtomic(configPath, config);
+    writeJsonAtomic(configPath, config, { trailingNewline: true });
   }
 
   if (settingsExists) {
@@ -117,7 +100,7 @@ function main() {
     command,
     padding: 0,
   };
-  writeJsonAtomic(settingsPath, settings);
+  writeJsonAtomic(settingsPath, settings, { trailingNewline: true });
 
   console.log('');
   console.log('Claude Code statusLine is now configured:');

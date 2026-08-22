@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -21,4 +22,13 @@ test('PowerShell shortcut manager parses without syntax errors', { skip: process
   ], { encoding: 'utf8' });
 
   assert.equal(result.status, 0, result.stderr);
+});
+
+test('desktop starter prefers a packaged portable executable before Electron development files', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'start-dashboard-desktop.bat'), 'utf8');
+  const portableIndex = source.indexOf('release\\AI-Usage-Dashboard-*-portable.exe');
+  const electronIndex = source.indexOf('node_modules\\electron\\dist\\electron.exe');
+  assert.ok(portableIndex >= 0);
+  assert.ok(electronIndex >= 0);
+  assert.ok(portableIndex < electronIndex);
 });

@@ -192,6 +192,7 @@ test('Grok bridge CLI args default to one-shot and parse watch intervals', () =>
   assert.equal(parseCliArgs(['--watch', '90']).watch, true);
   assert.equal(parseCliArgs(['--watch', '90']).intervalSeconds, 90);
   assert.equal(parseCliArgs(['--interval=120']).intervalSeconds, 120);
+  assert.equal(parseCliArgs(['--no-write-back']).writeBack, false);
 });
 
 test('Grok bridge refreshes an expired OAuth token and rewrites auth.json', async (t) => {
@@ -232,10 +233,50 @@ test('Grok bridge refreshes an expired OAuth token and rewrites auth.json', asyn
   const entry = Object.values(rewritten)[0];
   assert.equal(entry.key, 'fresh-access');
   assert.equal(entry.refresh_token, 'fresh-refresh');
+  const backup = JSON.parse(fs.readFileSync(`${authPath}.bak`, 'utf8'));
+  assert.equal(Object.values(backup)[0].key, 'expired-token');
   assert.equal(fs.existsSync(`${authPath}.grok-usage.lock`), false);
 
   const payload = await fetchGrokUsage({ authPath, fetchImpl });
   assert.equal(payload.config.creditUsagePercent, 4);
+});
+
+test('Grok credential refresh can skip write-back and never overwrites a malformed target', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-usage-cred-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const authPath = writeAuth(directory, {
+    key: 'expired-token',
+    expires_at: new Date(Date.now() - 1000).toISOString(),
+  });
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ access_token: 'fresh-access', refresh_token: 'fresh-refresh', expires_in: 3600 }),
+  });
+  const valid = fs.readFileSync(authPath, 'utf8');
+
+  assert.equal(
+    await refreshGrokOAuthToken({ authPath, fetchImpl, writeBack: false }),
+    'fresh-access',
+  );
+  assert.equal(fs.readFileSync(authPath, 'utf8'), valid);
+  assert.equal(fs.existsSync(`${authPath}.bak`), false);
+
+  const malformed = JSON.stringify({
+    'https://auth.x.ai::client': {
+      refresh_token: 'refresh-token-live',
+      expires_at: new Date(Date.now() - 1000).toISOString(),
+    },
+  });
+  fs.writeFileSync(authPath, malformed);
+  const warnings = [];
+  assert.equal(
+    await refreshGrokOAuthToken({ authPath, fetchImpl, warn: (message) => warnings.push(message) }),
+    'fresh-access',
+  );
+  assert.equal(fs.readFileSync(authPath, 'utf8'), malformed);
+  assert.equal(fs.existsSync(`${authPath}.bak`), false);
+  assert.match(warnings[0], /has no key/);
 });
 
 test('Grok bridge reports a rejected refresh token as a re-login requirement', async (t) => {

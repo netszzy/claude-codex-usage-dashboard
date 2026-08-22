@@ -5,6 +5,11 @@ yarn-error.log*
 pnpm-debug.log*
 
 config.json
+.agents/
+.claude/
+.codex/
+.grok/
+.kimi-code/
 *.bak
 *.bak-*
 *.log
@@ -16,9 +21,9 @@ Thumbs.db
 .vscode/
 .idea/
 .codegraph/
+release/
 .workbuddy/
-*.db-shm
-*.db-wal
+*.db*
 
 usage-cache.json
 streamdeck-usage.json

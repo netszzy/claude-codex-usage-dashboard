@@ -3,6 +3,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { clampBoundsToArea, resizeBoundsFromBottomRight } = require('./window-bounds');
+const { buildTrayMenuTemplate } = require('./menu-template');
 
 app.setName('Usage Watch');
 
@@ -61,6 +62,9 @@ let lastServerError = '';
 const DEFAULT_WIDTH = 380;
 const DEFAULT_HEIGHT = 224;
 const MIN_HUD_WIDTH = 240;
+const MAX_HUD_WIDTH = 32768;
+const MIN_HUD_HEIGHT = 48;
+const MAX_HUD_HEIGHT = 640;
 
 // Fractional display scaling can make window.getBounds() report a width/height
 // that drifts from what was actually requested. Track the intended size ourselves
@@ -343,7 +347,7 @@ function bindDragIpc() {
     const width = Math.round(Number(size.width));
     const height = Math.round(Number(size.height));
     if (!Number.isFinite(width) || !Number.isFinite(height)) return;
-    if (width < MIN_HUD_WIDTH || width > 640 || height < 120 || height > 640) return;
+    if (width < MIN_HUD_WIDTH || width > MAX_HUD_WIDTH || height < MIN_HUD_HEIGHT || height > MAX_HUD_HEIGHT) return;
     const current = { ...mainWindow.getBounds(), width: hudSize.width, height: hudSize.height };
     const display = screen.getDisplayMatching(current) || screen.getPrimaryDisplay();
     const bounds = resizeBoundsFromBottomRight(current, { width, height }, display.workArea);
@@ -416,32 +420,23 @@ function toggleWindow() {
 
 function rebuildTrayMenu() {
   if (!tray) return;
-  tray.setContextMenu(Menu.buildFromTemplate([
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate(
     {
-      label: mainWindow && mainWindow.isVisible() ? '隐藏浮窗' : '显示浮窗',
-      click: toggleWindow,
+      visible: Boolean(mainWindow && mainWindow.isVisible()),
+      alwaysOnTop: isAlwaysOnTop,
     },
     {
-      label: '重载',
-      click: () => {
+      toggle: toggleWindow,
+      reload: () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.reload();
           showWindow();
         }
       },
+      setAlwaysOnTop: (menuItem) => applyTopMost(mainWindow, menuItem.checked),
+      quit: () => app.quit(),
     },
-    {
-      label: '始终置顶',
-      type: 'checkbox',
-      checked: isAlwaysOnTop,
-      click: (menuItem) => applyTopMost(mainWindow, menuItem.checked),
-    },
-    { type: 'separator' },
-    {
-      label: '退出',
-      click: () => app.quit(),
-    },
-  ]));
+  )));
 }
 
 function ensureTray() {

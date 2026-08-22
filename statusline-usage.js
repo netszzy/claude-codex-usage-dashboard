@@ -1,8 +1,8 @@
 'use strict';
 
-const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { writeJsonAtomic } = require('./lib/atomic-json');
 
 const CACHE_PATH = process.env.CLAUDE_USAGE_CACHE
   || path.join(os.homedir(), '.claude', 'usage-cache.json');
@@ -10,24 +10,6 @@ const alertValue = Number(process.env.ALERT_PERCENT);
 const ALERT_PERCENT = Number.isFinite(alertValue) && alertValue >= 0 && alertValue <= 100
   ? alertValue
   : 85;
-
-function writeCacheAtomic(data) {
-  const directory = path.dirname(CACHE_PATH);
-  const temporaryPath = path.join(
-    directory,
-    `.${path.basename(CACHE_PATH)}.${process.pid}.${Date.now()}.tmp`,
-  );
-  fs.mkdirSync(directory, { recursive: true });
-  try {
-    fs.writeFileSync(temporaryPath, JSON.stringify(data));
-    fs.renameSync(temporaryPath, CACHE_PATH);
-  } catch (error) {
-    try {
-      fs.unlinkSync(temporaryPath);
-    } catch {}
-    throw error;
-  }
-}
 
 let input = '';
 process.stdin.setEncoding('utf8');
@@ -44,10 +26,10 @@ process.stdin.on('end', () => {
   const rateLimits = session.rate_limits || null;
   if (rateLimits) {
     try {
-      writeCacheAtomic({
+      writeJsonAtomic(CACHE_PATH, {
         fetchedAt: Date.now(),
         rate_limits: rateLimits,
-      });
+      }, { indent: 0 });
     } catch (error) {}
   }
 

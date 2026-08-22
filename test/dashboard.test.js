@@ -26,8 +26,8 @@ const {
 
 test('expired reset timestamps are not projected into a future cycle', () => {
   const now = Date.UTC(2026, 6, 10, 12, 0, 0);
-  assert.equal(resetText(now - 60_000, now), 'expired');
-  assert.equal(resetText(now + 90 * 60_000, now), '1h 30m');
+  assert.equal(resetText(now - 60_000, now), '已到期');
+  assert.equal(resetText(now + 90 * 60_000, now), '1 小时 30 分钟');
 });
 
 test('the configured alert threshold controls the alert state', () => {
@@ -40,13 +40,13 @@ test('the configured alert threshold controls the alert state', () => {
 test('service freshness remains visible in the rendered state model', () => {
   const now = Date.UTC(2026, 6, 10, 12, 0, 0);
   const stale = serviceState({ five: { used: 10 }, stale: true, fetchedAt: now - 3600_000 }, now);
-  assert.deepEqual(stale, { label: 'stale 1h', kind: 'stale' });
+  assert.deepEqual(stale, { label: 'STALE · 已过期 · 1 小时前', kind: 'stale' });
 
   const offline = serviceState({ five: { used: 10 }, stale: true, fetchedAt: now, error: 'offline' }, now);
-  assert.deepEqual(offline, { label: 'offline now', kind: 'error' });
-  assert.deepEqual(serviceState({ windows: [] }, now), { label: 'waiting', kind: 'idle' });
-  assert.deepEqual(serviceState({ windows: [], error: 'offline' }, now), { label: 'offline', kind: 'error' });
-  assert.equal(ageText(null, now), 'unknown age');
+  assert.deepEqual(offline, { label: 'OFFLINE · 离线 · 刚刚', kind: 'error' });
+  assert.deepEqual(serviceState({ windows: [] }, now), { label: '等待快照', kind: 'idle' });
+  assert.deepEqual(serviceState({ windows: [], error: 'offline' }, now), { label: 'OFFLINE · 离线', kind: 'error' });
+  assert.equal(ageText(null, now), '未知');
 });
 
 test('waiting agents stay neutral while active agents determine the overall state', () => {
@@ -55,12 +55,12 @@ test('waiting agents stay neutral while active agents determine the overall stat
   const stale = { label: 'stale 1h', kind: 'stale' };
   const offline = { label: 'offline now', kind: 'error' };
 
-  assert.deepEqual(overallState([]), { label: 'no agents', kind: 'idle' });
-  assert.deepEqual(overallState([waiting]), { label: 'waiting', kind: 'idle' });
-  assert.deepEqual(overallState([live, waiting]), { label: 'live', kind: 'live' });
-  assert.deepEqual(overallState([stale, waiting]), { label: 'stale data', kind: 'stale' });
-  assert.deepEqual(overallState([offline, waiting]), { label: 'offline', kind: 'error' });
-  assert.deepEqual(overallState([live, offline, waiting]), { label: 'degraded', kind: 'error' });
+  assert.deepEqual(overallState([]), { label: '未选择 Agent', kind: 'idle' });
+  assert.deepEqual(overallState([waiting]), { label: '等待快照', kind: 'idle' });
+  assert.deepEqual(overallState([live, waiting]), { label: 'LIVE · 正常', kind: 'live' });
+  assert.deepEqual(overallState([stale, waiting]), { label: 'STALE · 数据过期', kind: 'stale' });
+  assert.deepEqual(overallState([offline, waiting]), { label: 'OFFLINE · 离线', kind: 'error' });
+  assert.deepEqual(overallState([live, offline, waiting]), { label: 'OFFLINE · 部分离线', kind: 'error' });
 });
 
 test('settings choices reflect current freshness instead of historical availability', () => {
@@ -164,12 +164,13 @@ test('usage polling pauses while the page is hidden and refreshes as soon as it 
     },
   );
 
-  assert.equal(intervalMs, 5000);
+  assert.equal(intervalMs, 60000);
   assert.equal(intervalCallback(), false);
   assert.equal(refreshCount, 0);
 
   pageDocument.visibilityState = 'visible';
   assert.equal(listeners.get('visibilitychange')(), true);
+  assert.equal(intervalMs, 5000);
   assert.equal(refreshCount, 1);
   assert.equal(refreshWhenVisible(), true);
   assert.equal(refreshCount, 2);
@@ -187,10 +188,10 @@ test('dashboard settings keep valid selections and fall back to configured defau
   });
   assert.deepEqual(normalizeSettings({
     visibleAgents: ['gemini', 'missing', 'gemini', 'cursor'],
-    density: 'compact',
+    density: 'strip',
   }, catalog), {
     visibleAgents: ['gemini', 'cursor'],
-    density: 'compact',
+    density: 'strip',
   });
 });
 
@@ -230,6 +231,12 @@ test('adaptive layout changes density and columns with the selected agent count'
     density: 'compact',
     width: 600,
     height: 266,
+  });
+  assert.deepEqual(resolveLayout(6, 'strip'), {
+    columns: 1,
+    density: 'strip',
+    width: 32768,
+    height: 48,
   });
   assert.equal(resolveLayout(9, 'comfortable').height, 640);
   assert.equal(resolveLayout(11, 'standard').height, 640);
@@ -314,6 +321,13 @@ test('polling does not replay an estimated height after the target width was req
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     assert.deepEqual(resizeCalls, [[500, 640]]);
+
+    resizeCalls.length = 0;
+    dashboardHeight = 34;
+    requestDesktopResize({ width: 480, height: 48, density: 'strip' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.deepEqual(resizeCalls, [[480, 48]]);
   } finally {
     if (originalWindow === undefined) delete global.window;
     else global.window = originalWindow;
@@ -323,9 +337,9 @@ test('polling does not replay an estimated height after the target width was req
 });
 
 test('settings window is tall enough for built-in choices and capped for long catalogs', () => {
-  assert.equal(settingsWindowHeight(0), 420);
-  assert.equal(settingsWindowHeight(7), 462);
-  assert.equal(settingsWindowHeight(32), 600);
+  assert.equal(settingsWindowHeight(0), 500);
+  assert.equal(settingsWindowHeight(7), 542);
+  assert.equal(settingsWindowHeight(32), 640);
 });
 
 test('main quota card keeps reset countdowns visible and legible at standard density', () => {
@@ -344,6 +358,29 @@ test('main quota card keeps reset countdowns visible and legible at standard den
   assert.match(script, /element\('span', 'reset-text', resetLabel\)/);
 });
 
+test('localized reset countdowns wrap instead of being ellipsized in narrow cards', () => {
+  const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+
+  assert.match(stylesheet, /\.quota-copy\s*\{[^}]*flex-wrap:\s*wrap;[^}]*row-gap:\s*2px;/s);
+  assert.match(stylesheet, /\.quota-copy \.window-label\s*\{[^}]*max-width:\s*100%;/s);
+  assert.match(stylesheet, /\.quota-copy \.reset-text\s*\{[^}]*max-width:\s*100%;[^}]*overflow:\s*visible;[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s);
+  assert.match(stylesheet, /\.group-metric\s*\{[^}]*grid-template-columns:\s*auto auto minmax\(0,\s*1fr\);/s);
+  assert.match(stylesheet, /\.group-metric \.reset-text\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;/s);
+});
+
+test('horizontal strip layout keeps all agents in one scrolling row with bar progress', () => {
+  const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+  const markup = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+  const script = fs.readFileSync(path.join(__dirname, '..', 'dashboard.js'), 'utf8');
+
+  assert.match(markup, /input type="radio" name="density" value="strip">横向条/);
+  assert.match(script, /const STRIP_REQUEST_WIDTH = 32768;/);
+  assert.match(stylesheet, /\.watch\[data-density="strip"\] \{[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\);/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip"\] \.readouts\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip"\] \.quota-ring::before\s*\{[^}]*display:\s*none;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip"\] \.quota::after\s*\{[^}]*height:\s*3px;[^}]*background:\s*linear-gradient/s);
+});
+
 test('grouped agent cards render individual reset countdowns for each group window', () => {
   const script = fs.readFileSync(path.join(__dirname, '..', 'dashboard.js'), 'utf8');
   const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
@@ -358,8 +395,8 @@ test('grouped agent cards render individual reset countdowns for each group wind
 });
 
 test('quota tooltips report the label, percentage and countdown as text', () => {
-  assert.equal(quotaTitle('5H', 42, '3h 20m'), '5H 42%, reset 3h 20m');
-  assert.equal(quotaTitle('7D', null, 'no reset'), '7D --, reset no reset');
+  assert.equal(quotaTitle('5H', 42, '3h 20m'), '5H 42%，重置：3h 20m');
+  assert.equal(quotaTitle('7D', null, 'no reset'), '7D --，重置：no reset');
 });
 
 test('alert text keeps readable contrast without changing the progress accent', () => {
@@ -421,6 +458,7 @@ test('usage signature changes when values, state or the minute bucket move', () 
 
   assert.notEqual(usageSignature(usage, settings, catalog, now + 60_000), base);
   assert.notEqual(usageSignature(usage, { ...settings, density: 'compact' }, catalog, now), base);
+  assert.notEqual(usageSignature(usage, { ...settings, density: 'strip' }, catalog, now), base);
   assert.notEqual(usageSignature(usage, settings, [...catalog, { id: 'kimi', label: 'Kimi Code' }], now), base);
 
   // config-level repaints: threshold, catalog labels/accents and window labels

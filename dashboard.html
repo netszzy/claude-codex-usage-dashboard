@@ -18,7 +18,7 @@
         <span>本机配额</span>
       </div>
       <div class="watch-actions" data-no-drag>
-        <span id="overall_state" class="overall-state" role="status" aria-live="polite" aria-atomic="true">connecting</span>
+        <span id="overall_state" class="overall-state" role="status" aria-live="polite" aria-atomic="true">连接中</span>
         <button id="settings_toggle" class="settings-toggle" type="button" aria-controls="settings_panel" aria-expanded="false" aria-label="打开显示设置" title="显示设置">
           <svg viewBox="0 0 20 20" aria-hidden="true">
             <path d="M4 5h12M7 10h9M4 15h12" />
@@ -54,16 +54,33 @@
       </fieldset>
 
       <fieldset class="settings-group">
-        <legend>卡片样式</legend>
+        <legend>布局样式</legend>
         <div class="density-choices">
           <label><input type="radio" name="density" value="auto">自适应</label>
           <label><input type="radio" name="density" value="compact">紧凑</label>
           <label><input type="radio" name="density" value="comfortable">舒展</label>
+          <label><input type="radio" name="density" value="strip">横向条</label>
+        </div>
+      </fieldset>
+
+      <fieldset class="settings-group">
+        <legend>告警阈值</legend>
+        <div class="alert-range">
+          <label for="alert_percent">使用率达到 <output id="alert_percent_value" for="alert_percent">85%</output> 时提醒</label>
+          <input id="alert_percent" type="range" min="50" max="95" step="1" value="85">
+        </div>
+      </fieldset>
+
+      <fieldset class="settings-group">
+        <legend>自动刷新桥接</legend>
+        <div class="agent-choices bridge-choices">
+          <label class="agent-choice bridge-choice"><span class="choice-copy"><strong>Kimi Code</strong><span>读取本机 Kimi 快照</span></span><input id="bridge_kimi" type="checkbox"></label>
+          <label class="agent-choice bridge-choice"><span class="choice-copy"><strong>Grok</strong><span>读取本机 Grok 快照</span></span><input id="bridge_grok" type="checkbox"></label>
         </div>
       </fieldset>
 
       <footer class="settings-foot">
-        <span>设置仅保存在本机</span>
+        <span id="settings_status" role="status" aria-live="polite">设置仅保存在本机</span>
         <button id="settings_reset" class="text-button" type="button">恢复默认</button>
       </footer>
     </aside>

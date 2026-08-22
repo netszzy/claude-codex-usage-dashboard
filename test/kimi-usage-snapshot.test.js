@@ -195,6 +195,11 @@ test('Kimi bridge CLI args default to one-shot and parse watch intervals', () =>
   assert.deepEqual(parseCliArgs(['--interval=900']), { watch: true, intervalSeconds: 900 });
   assert.deepEqual(parseCliArgs(['--watch', '5']), { watch: true, intervalSeconds: 30 });
   assert.deepEqual(parseCliArgs(['--watch', '--once']), { watch: false, intervalSeconds: 300 });
+  assert.deepEqual(parseCliArgs(['--no-write-back']), {
+    watch: false,
+    intervalSeconds: 300,
+    writeBack: false,
+  });
 });
 
 test('Kimi access token reuses a still-valid cached credential without HTTP', async (t) => {
@@ -255,7 +260,48 @@ test('Kimi bridge refreshes an expired OAuth token and rewrites the credential f
   assert.equal(rewritten.refresh_token, 'new-rt');
   assert.equal(rewritten.extra_field, 'keep-me');
   assert.ok(rewritten.expires_at >= before + 890 && rewritten.expires_at <= before + 910);
+  const backup = JSON.parse(fs.readFileSync(`${credentialsPath}.bak`, 'utf8'));
+  assert.equal(backup.access_token, 'expired-at');
+  assert.equal(backup.refresh_token, 'old-rt');
   assert.equal(fs.existsSync(`${credentialsPath}.kimi-usage.lock`), false);
+});
+
+test('Kimi credential refresh can skip write-back and never overwrites a malformed target', async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kimi-usage-cred-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const credentialsPath = path.join(directory, 'kimi-code.json');
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ access_token: 'new-at', refresh_token: 'new-rt', expires_in: 900 }),
+  });
+  const valid = JSON.stringify({
+    access_token: 'expired-at',
+    refresh_token: 'old-rt',
+    expires_at: Math.floor(Date.now() / 1000) - 3600,
+  });
+  fs.writeFileSync(credentialsPath, valid);
+
+  assert.equal(
+    await refreshKimiOAuthToken({ credentialsPath, fetchImpl, writeBack: false }),
+    'new-at',
+  );
+  assert.equal(fs.readFileSync(credentialsPath, 'utf8'), valid);
+  assert.equal(fs.existsSync(`${credentialsPath}.bak`), false);
+
+  const malformed = JSON.stringify({
+    refresh_token: 'old-rt',
+    expires_at: Math.floor(Date.now() / 1000) - 3600,
+  });
+  fs.writeFileSync(credentialsPath, malformed);
+  const warnings = [];
+  assert.equal(
+    await refreshKimiOAuthToken({ credentialsPath, fetchImpl, warn: (message) => warnings.push(message) }),
+    'new-at',
+  );
+  assert.equal(fs.readFileSync(credentialsPath, 'utf8'), malformed);
+  assert.equal(fs.existsSync(`${credentialsPath}.bak`), false);
+  assert.match(warnings[0], /access_token is missing/);
 });
 
 test('Kimi bridge reports a rejected refresh token as a re-login requirement', async (t) => {

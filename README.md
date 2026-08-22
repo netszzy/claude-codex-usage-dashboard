@@ -7,8 +7,9 @@
 ## 功能
 
 - 自动显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
-- 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展三种卡片样式间切换。
-- 悬浮窗按已选 Agent 数量自动调整为 1～3 列并同步改变窗口尺寸。
+- 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展卡片与横向信息条间切换。
+- 配置菜单可直接调整告警阈值与 Kimi/Grok 自动桥接开关，保存后重启不丢失。
+- 悬浮窗按已选 Agent 数量自动调整为 1～3 列；横向信息条会扩展到当前显示器宽度，并以进度条代替圆环。
 - 通过本地额度快照桥接 Kimi Code、Grok、Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
 - 内置 kimi-usage-snapshot.js，用本机 Kimi Code CLI 登录态读取官方 /usages 接口并写入快照。
 - 内置 grok-usage-snapshot.js，用本机 Grok CLI OAuth 登录态读取官方 billing credits 接口并写入快照。
@@ -66,10 +67,12 @@ Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现�
 点击悬浮窗右上角的“配置”：
 
 1. 勾选需要显示的 Agent；未连接的预设会标记为“等待快照”。
-2. 选择“自适应”“紧凑”或“舒展”卡片样式。
-3. 设置会写入 Electron 页面自己的本地存储，不修改 Agent 配置或凭据。
+2. 选择“自适应”“紧凑”“舒展”卡片样式，或选择“横向条”以单行进度条方式展示所有 Agent。
+3. 调整 50%～95% 的告警阈值，以及 Kimi Code、Grok 的自动刷新开关。
 
-“恢复默认”只恢复 Claude Code、Codex、Antigravity 三个自动采集项和自适应样式。
+显示 Agent 与布局样式写入 Electron 页面的本地存储；告警阈值与桥接开关写入 `%USERPROFILE%\.claude-codex-usage-dashboard\dashboard-config.json`。这两类设置都不修改 Agent 配置或凭据。`ALERT_PERCENT`、`KIMI_USAGE_BRIDGE`、`GROK_USAGE_BRIDGE` 环境变量仍可覆盖本机保存值。
+
+“恢复默认”会恢复 Claude Code、Codex、Antigravity 三个自动采集项、自适应样式、85% 告警阈值，以及两个桥接均自动刷新。
 
 ## 更多 Agent 额度桥接
 
@@ -127,7 +130,7 @@ node kimi-usage-snapshot.js          # 手动单次刷新
 node kimi-usage-snapshot.js --watch  # 脱离看板时每 5 分钟自动刷新
 ~~~
 
-脚本复用 Kimi Code CLI 的本机 OAuth 登录态（`~/.kimi-code/credentials/kimi-code.json`），请求与 CLI `/usage` 命令同源的官方 `GET /usages` 接口。只有额度百分比和重置时间会写入快照；访问令牌不会进入快照、日志或看板服务。访问令牌约 15 分钟过期，脚本会自动用凭据里的 refresh_token 续期并原子回写凭据文件（带文件锁避免与 CLI 同时刷新竞争）；只有 refresh_token 本身被服务端拒绝时才需要重新 /login。单次刷新失败时保留最后一份有效快照，没有有效快照时才写入错误占位。也可以用 `KIMI_USAGE_TOKEN` 环境变量直接提供 Kimi Code Console 签发的 API Key，跳过 OAuth 文件。
+脚本复用 Kimi Code CLI 的本机 OAuth 登录态（`~/.kimi-code/credentials/kimi-code.json`），请求与 CLI `/usage` 命令同源的官方 `GET /usages` 接口。只有额度百分比和重置时间会写入快照；访问令牌不会进入快照、日志或看板服务。访问令牌约 15 分钟过期；默认情况下，脚本会在确认凭据结构未变化后，用 refresh_token 续期并原子回写凭据文件，同时保留上一版 `.bak`。如希望完全不写回第三方凭据，使用 `node kimi-usage-snapshot.js --no-write-back` 或设置 `KIMI_USAGE_WRITE_BACK=off`；续期和快照更新仍会继续。只有 refresh_token 本身被服务端拒绝时才需要重新 /login。单次刷新失败时保留最后一份有效快照，没有有效快照时才写入错误占位。也可以用 `KIMI_USAGE_TOKEN` 环境变量直接提供 Kimi Code Console 签发的 API Key，跳过 OAuth 文件。
 
 日常使用时，把单次模式挂到 Windows 任务计划程序，或让 `--watch` 模式随看板一起启动即可。
 
@@ -140,7 +143,7 @@ node grok-usage-snapshot.js          # 手动单次刷新
 node grok-usage-snapshot.js --watch  # 脱离看板时每 5 分钟自动刷新
 ~~~
 
-脚本复用 Grok CLI 的本机 OAuth 登录态（`~/.grok/auth.json`），请求与 CLI `/usage` 命令同源的官方 `GET /billing?format=credits` 接口（默认 `https://cli-chat-proxy.grok.com/v1`）。快照只写入总体 `creditUsagePercent` 与周期结束时间；访问令牌不会进入快照、日志或看板服务。令牌过期时脚本会用 refresh_token 向 `auth.x.ai` 续期并原子回写 `auth.json`（带文件锁避免与 CLI 竞争）。单次刷新失败时保留最后一份有效快照。也可以用 `GROK_USAGE_TOKEN`（或 `XAI_API_KEY`）直接提供令牌；注意 billing 接口通常需要 grok.com OAuth 会话，纯 API Key 可能无法读取额度。
+脚本复用 Grok CLI 的本机 OAuth 登录态（`~/.grok/auth.json`），请求与 CLI `/usage` 命令同源的官方 `GET /billing?format=credits` 接口（默认 `https://cli-chat-proxy.grok.com/v1`）。快照只写入总体 `creditUsagePercent` 与周期结束时间；访问令牌不会进入快照、日志或看板服务。令牌过期时，默认脚本会先校验选中的 OAuth 槽位，再用 refresh_token 向 `auth.x.ai` 续期并原子回写 `auth.json`，同时保留 `.bak`。如希望完全不写回第三方凭据，使用 `node grok-usage-snapshot.js --no-write-back` 或设置 `GROK_USAGE_WRITE_BACK=off`；续期和快照更新仍会继续。单次刷新失败时保留最后一份有效快照。也可以用 `GROK_USAGE_TOKEN`（或 `XAI_API_KEY`）直接提供令牌；注意 billing 接口通常需要 grok.com OAuth 会话，纯 API Key 可能无法读取额度。
 
 在看板配置面板中勾选 **Grok** 即可显示；默认不勾选，与其他 local-bridge 预设一致。
 
@@ -160,7 +163,7 @@ node grok-usage-snapshot.js --watch  # 脱离看板时每 5 分钟自动刷新
 .\setup-claude-statusline.bat --fanout
 ~~~
 
-fanout 模式会把原命令保存到忽略提交的 config.json，然后让 statusline-both.js 同时更新面板缓存并调用原命令。如果 config.json 已包含不同命令，脚本会停止并要求人工确认。
+fanout 模式会把原命令保存到忽略提交的 config.json，然后让 statusline-both.js 同时更新面板缓存并调用原命令。如果 config.json 已包含不同命令，脚本会停止并要求人工确认。普通 fanout 会按带引号语义解析为 argv，并以 `shell: false` 执行；包含管道等 shell 语义的旧命令必须由用户显式运行 `node statusline-both.js --allow-shell`，该模式会在 stderr 输出完整命令。
 
 配置后：
 
@@ -194,6 +197,7 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | HOST | 127.0.0.1 | 仅允许 127.0.0.1、localhost 或 ::1 |
 | DASHBOARD_PORT | 8787 | Electron 使用的服务端口 |
 | DASHBOARD_HOST | 127.0.0.1 | Electron 使用的服务地址，仅允许 loopback |
+| DASHBOARD_CONFIG_PATH | ~/.claude-codex-usage-dashboard/dashboard-config.json | 看板自有配置文件路径 |
 | ALERT_PERCENT | 85 | 进入红色告警状态的使用率 |
 | CODEX_LOOKBACK_DAYS | 14 | 查找 Codex 会话文件的天数 |
 | CLAUDE_STALE_MINUTES | 10 | Claude 数据过期阈值 |
@@ -224,6 +228,7 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | KIMI_USAGE_STALE_MINUTES | 30 | Kimi 快照过期阈值 |
 | KIMI_USAGE_SNAPSHOT | AGENT_USAGE_DIR/kimi.json | Kimi 快照输出路径 |
 | KIMI_USAGE_LABEL | Kimi Code | Kimi 卡片显示名称 |
+| KIMI_USAGE_WRITE_BACK | on | 设为 off 时，续期后不回写 Kimi CLI 凭据 |
 | GROK_HOME | ~/.grok | Grok CLI 的数据目录 |
 | GROK_AUTH_PATH | GROK_HOME/auth.json | Grok OAuth 凭据路径 |
 | GROK_USAGE_TOKEN | 空 | 直接使用访问令牌，跳过 auth.json |
@@ -237,6 +242,7 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | GROK_USAGE_STALE_MINUTES | 30 | Grok 快照过期阈值 |
 | GROK_USAGE_SNAPSHOT | AGENT_USAGE_DIR/grok.json | Grok 快照输出路径 |
 | GROK_USAGE_LABEL | Grok | Grok 卡片显示名称 |
+| GROK_USAGE_WRITE_BACK | on | 设为 off 时，续期后不回写 Grok CLI 凭据 |
 
 示例：
 
@@ -248,7 +254,8 @@ npm start
 ## 本地 API
 
 - GET /healthz：轻量健康检查，不读取日志。
-- GET /api/usage：返回标准化的 `agents` 列表、`config.agents` 目录和 `config.alertPercent`；同时保留原有 `claude`、`codex`、`antigravity` 字段兼容旧客户端。
+- GET /api/usage：返回标准化的 `agents` 列表、`config.agents` 目录、`config.alertPercent` 和 `config.bridges`；同时保留原有 `claude`、`codex`、`antigravity` 字段兼容旧客户端。响应带 ETag，客户端可通过 `If-None-Match` 获得 304。
+- POST /api/config：仅接受本机 Origin 的 JSON 请求；白名单字段为 `alertPercent` 与 `bridges.kimi`、`bridges.grok`。
 - GET /?mode=desktop：HUD 页面。
 
 其他 Host、方法和路径会返回 403、405 或 404。
@@ -258,10 +265,11 @@ npm start
 ~~~powershell
 npm test
 npm run check
+npm run pack:win
 npm audit
 ~~~
 
-npm run check 会检查所有 JavaScript 文件语法并运行测试。
+`npm run check` 会执行入口语法检查、全量 ESLint 与测试。`npm run pack:win` 会生成 `release/AI-Usage-Dashboard-<version>-portable.exe`；该文件可在未安装 Node.js 的 Windows 机器上直接双击运行。开发仓库中的 `start-dashboard-desktop.bat` 会优先启动该便携包，找不到时才回退到 `node_modules` 中的 Electron。
 
 ## 隐私
 
@@ -272,9 +280,9 @@ npm run check 会检查所有 JavaScript 文件语法并运行测试。
 - Kimi 桥接脚本仅在请求官方 /usages 接口时使用本机 OAuth 凭据；快照只包含额度百分比与重置时间。
 - 项目不会上传本地缓存或日志。
 
-不要提交 Claude/Codex 本地缓存、Claude 设置、config.json、凭据或可能暴露账号/路径/工作区的截图。
+不要提交 `.agents/`、`.claude/`、`.codex/`、`.grok/`、`.kimi-code/`、Claude/Codex 本地缓存、`config.json`、任何 `*.db*` 文件、凭据或可能暴露账号/路径/工作区的截图。这些路径已由项目 `.gitignore` 显式保护。
 
-安全边界详见 [SECURITY.md](SECURITY.md)，首次上传步骤见 [GITHUB_UPLOAD_GUIDE.md](GITHUB_UPLOAD_GUIDE.md)。
+界面术语见 [docs/TERMINOLOGY.md](docs/TERMINOLOGY.md)，安全边界详见 [SECURITY.md](SECURITY.md)，首次上传步骤见 [GITHUB_UPLOAD_GUIDE.md](GITHUB_UPLOAD_GUIDE.md)。
 
 ## License
 

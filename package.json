@@ -13,7 +13,9 @@
     "setup:claude": "node setup-statusline.js",
     "setup:claude:fanout": "node setup-statusline.js --fanout",
     "test": "node --test",
-    "check": "node --check server.js && node --check kimi-usage-snapshot.js && node --check grok-usage-snapshot.js && node --check dashboard.js && node --check desktop/main.js && node --check desktop/preload.js && node --check desktop/window-bounds.js && node --check setup-statusline.js && node --check statusline-usage.js && node --check statusline-both.js && node --check scripts/ensure-electron.js && node scripts/ensure-electron.js --check && npm test"
+    "lint": "eslint .",
+    "check": "node --check server.js && node --check kimi-usage-snapshot.js && node --check grok-usage-snapshot.js && node --check dashboard.js && node --check desktop/main.js && node --check desktop/menu-template.js && node --check desktop/preload.js && node --check desktop/window-bounds.js && node --check setup-statusline.js && node --check statusline-usage.js && node --check statusline-both.js && node --check scripts/ensure-electron.js && node scripts/ensure-electron.js --check && npm run lint && npm test",
+    "pack:win": "electron-builder --win portable"
   },
   "keywords": [
     "claude",
@@ -27,7 +29,56 @@
   "engines": {
     "node": ">=22.12.0"
   },
+  "overrides": {
+    "@electron/get": {
+      "undici": "7.29.0"
+    }
+  },
+  "build": {
+    "appId": "com.local.claude-codex-usage-dashboard",
+    "productName": "AI Usage Dashboard",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "**/*",
+      "!.agents{,/**}",
+      "!.claude{,/**}",
+      "!.codegraph{,/**}",
+      "!.codex{,/**}",
+      "!.grok{,/**}",
+      "!.idea{,/**}",
+      "!.kimi-code{,/**}",
+      "!.vscode{,/**}",
+      "!.workbuddy{,/**}",
+      "!archive{,/**}",
+      "!config.json",
+      "!docs{,/**}",
+      "!release{,/**}",
+      "!test{,/**}",
+      "!*.md",
+      "!**/*.bak",
+      "!**/*.db*",
+      "!**/*.log",
+      "!**/*.tmp"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "AI-Usage-Dashboard-${version}-portable.${ext}"
+    }
+  },
   "devDependencies": {
-    "electron": "^43.1.0"
+    "electron": "^43.1.0",
+    "electron-builder": "26.15.3",
+    "eslint": "10.9.0"
   }
 }

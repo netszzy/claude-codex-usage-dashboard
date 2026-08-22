@@ -4,16 +4,13 @@ const DEFAULT_ALERT_PERCENT = 85;
 const MAX_HUD_HEIGHT = 640;
 const SETTINGS_MIN_WIDTH = 480;
 const SETTINGS_KEY = 'usage-watch.settings.v1';
-const DENSITIES = new Set(['auto', 'compact', 'comfortable']);
-const LEGACY_AGENTS = [
-  { id: 'claude', label: 'Claude Code', accent: '#d99a5d', defaultVisible: true, source: 'statusline-cache' },
-  { id: 'codex', label: 'Codex', accent: '#67bdb4', defaultVisible: true, source: 'codex-sessions' },
-  { id: 'antigravity', label: 'Antigravity', accent: '#9fbd69', defaultVisible: true, source: 'antigravity-grpc' },
-];
+const STRIP_REQUEST_WIDTH = 32768;
+const STRIP_MIN_HEIGHT = 48;
+const DENSITIES = new Set(['auto', 'compact', 'comfortable', 'strip']);
 
 let latestUsage = null;
 let lastGoodUsage = null;
-let currentCatalog = LEGACY_AGENTS;
+let currentCatalog = [];
 let currentSettings = null;
 let settingsOpen = false;
 let settingsClosing = false;
@@ -24,6 +21,7 @@ let lastResizeWidth = null;
 let settingsReturnFocus = null;
 let lastRenderSignature = null;
 let previousCardSignatures = new Map();
+let usageEtag = null;
 
 function percentValue(windowData) {
   return windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used)
@@ -32,24 +30,24 @@ function percentValue(windowData) {
 }
 
 function ageText(timestamp, now = Date.now()) {
-  if (!timestamp) return 'unknown age';
+  if (!timestamp) return '未知';
   const seconds = Math.max(0, Math.floor((now - timestamp) / 1000));
-  if (seconds < 60) return 'now';
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
-  return `${Math.floor(seconds / 86400)}d`;
+  if (seconds < 60) return '刚刚';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+  return `${Math.floor(seconds / 86400)} 天前`;
 }
 
 function resetText(timestamp, now = Date.now()) {
-  if (!timestamp) return 'no reset';
+  if (!timestamp) return '无重置时间';
   const seconds = Math.floor((timestamp - now) / 1000);
-  if (seconds <= 0) return 'expired';
+  if (seconds <= 0) return '已到期';
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  if (days > 0) return `${days}d ${hours}h`;
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${Math.max(0, minutes)}m`;
+  if (days > 0) return `${days} 天 ${hours} 小时`;
+  if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
+  return `${Math.max(0, minutes)} 分钟`;
 }
 
 function quotaLevel(value, alertPercent = DEFAULT_ALERT_PERCENT) {
@@ -75,29 +73,29 @@ function hasUsageData(data) {
 function serviceState(data, now = Date.now()) {
   if (!data || !hasUsageData(data)) {
     return data && data.error
-      ? { label: 'offline', kind: 'error' }
-      : { label: 'waiting', kind: 'idle' };
+      ? { label: 'OFFLINE · 离线', kind: 'error' }
+      : { label: '等待快照', kind: 'idle' };
   }
   const age = ageText(data.fetchedAt, now);
-  if (data.error) return { label: `offline ${age}`, kind: 'error' };
-  if (data.stale) return { label: `stale ${age}`, kind: 'stale' };
-  return { label: `live ${age}`, kind: 'live' };
+  if (data.error) return { label: `OFFLINE · 离线 · ${age}`, kind: 'error' };
+  if (data.stale) return { label: `STALE · 已过期 · ${age}`, kind: 'stale' };
+  return { label: `LIVE · 实时 · ${age}`, kind: 'live' };
 }
 
 function overallState(states) {
-  if (!states.length) return { label: 'no agents', kind: 'idle' };
+  if (!states.length) return { label: '未选择 Agent', kind: 'idle' };
   const activeStates = states.filter((state) => state.kind !== 'idle');
-  if (!activeStates.length) return { label: 'waiting', kind: 'idle' };
+  if (!activeStates.length) return { label: '等待快照', kind: 'idle' };
   const hasError = activeStates.some((state) => state.kind === 'error');
   const hasStale = activeStates.some((state) => state.kind === 'stale');
   if (hasError) {
     return {
-      label: activeStates.every((state) => state.kind === 'error') ? 'offline' : 'degraded',
+        label: activeStates.every((state) => state.kind === 'error') ? 'OFFLINE · 离线' : 'OFFLINE · 部分离线',
       kind: 'error',
     };
   }
-  if (hasStale) return { label: 'stale data', kind: 'stale' };
-  return { label: 'live', kind: 'live' };
+  if (hasStale) return { label: 'STALE · 数据过期', kind: 'stale' };
+  return { label: 'LIVE · 正常', kind: 'live' };
 }
 
 function choiceState(data, now = Date.now()) {
@@ -111,7 +109,7 @@ function choiceState(data, now = Date.now()) {
   return { label: labels[state.kind], kind: state.kind };
 }
 
-function normalizeSettings(raw, catalog = LEGACY_AGENTS) {
+function normalizeSettings(raw, catalog = []) {
   const availableIds = new Set(catalog.map((agent) => agent.id));
   const defaults = catalog.filter((agent) => agent.defaultVisible).map((agent) => agent.id);
   const visibleAgents = raw && Array.isArray(raw.visibleAgents)
@@ -122,6 +120,14 @@ function normalizeSettings(raw, catalog = LEGACY_AGENTS) {
 }
 
 function resolveLayout(agentCount, density = 'auto', wideSingleCard = false) {
+  if (density === 'strip') {
+    return {
+      columns: 1,
+      density: 'strip',
+      width: STRIP_REQUEST_WIDTH,
+      height: STRIP_MIN_HEIGHT,
+    };
+  }
   const resolvedDensity = density === 'auto'
     ? agentCount >= 5 ? 'compact' : 'standard'
     : density;
@@ -143,20 +149,13 @@ function resolveLayout(agentCount, density = 'auto', wideSingleCard = false) {
 function catalogFromUsage(usage) {
   const catalog = usage && usage.config && Array.isArray(usage.config.agents)
     ? usage.config.agents
-    : LEGACY_AGENTS;
+    : [];
   return catalog.filter((agent) => agent && typeof agent.id === 'string' && typeof agent.label === 'string');
 }
 
 function agentsFromUsage(usage) {
   if (usage && Array.isArray(usage.agents)) return usage.agents;
-  return LEGACY_AGENTS.map((metadata) => ({
-    ...metadata,
-    ...(usage && usage[metadata.id] ? usage[metadata.id] : {}),
-    windows: [
-      { id: 'five', label: '5H', ...((usage && usage[metadata.id] && usage[metadata.id].five) || {}) },
-      { id: 'seven', label: '7D', ...((usage && usage[metadata.id] && usage[metadata.id].seven) || {}) },
-    ],
-  }));
+  return [];
 }
 
 function windowDataSignature(windows) {
@@ -198,7 +197,7 @@ function usageSignature(usage, settings, catalog, now = Date.now()) {
 
 function offlineUsage(usage, catalog, error) {
   const base = usage && typeof usage === 'object' ? usage : {};
-  const message = error && error.message ? error.message : 'Dashboard service offline';
+  const message = error && error.message ? error.message : '看板服务离线';
   const byId = new Map(agentsFromUsage(base).map((agent) => [agent.id, agent]));
   const agents = catalog.map((metadata) => {
     const previous = byId.get(metadata.id);
@@ -244,14 +243,22 @@ function createUsageRefresher(loadUsage, onUsage, onError) {
   };
 }
 
-function installUsagePolling(refresh, pageDocument = document, setIntervalFn = setInterval) {
+function installUsagePolling(refresh, pageDocument = document, setIntervalFn = setInterval, clearIntervalFn = clearInterval) {
+  let timer = null;
   const refreshWhenVisible = () => {
     if (pageDocument.visibilityState !== 'visible') return false;
     refresh();
     return true;
   };
-  setIntervalFn(refreshWhenVisible, 5000);
-  pageDocument.addEventListener('visibilitychange', refreshWhenVisible);
+  const resetTimer = () => {
+    if (timer !== null) clearIntervalFn(timer);
+    timer = setIntervalFn(refreshWhenVisible, pageDocument.visibilityState === 'visible' ? 5000 : 60000);
+  };
+  resetTimer();
+  pageDocument.addEventListener('visibilitychange', () => {
+    resetTimer();
+    return refreshWhenVisible();
+  });
   return refreshWhenVisible;
 }
 
@@ -271,7 +278,7 @@ function quotaValueElement(windowData, alertPercent) {
 }
 
 function quotaTitle(labelText, value, resetLabel) {
-  return `${labelText} ${value === null ? '--' : `${value}%`}, reset ${resetLabel}`;
+  return `${labelText} ${value === null ? '--' : `${value}%`}，重置：${resetLabel}`;
 }
 
 function quotaGrid(windows, alertPercent, now) {
@@ -285,10 +292,10 @@ function quotaGrid(windows, alertPercent, now) {
     const { level, value, valueNode } = quotaValueElement(windowData, alertPercent);
     const resetLabel = resetText(windowData.resetAt, now);
     const reset = element('span', 'reset-text', resetLabel);
-    reset.setAttribute('aria-label', `reset ${resetLabel}`);
+    reset.setAttribute('aria-label', `重置：${resetLabel}`);
     const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
     quota.title = quotaTitle(labelText, value, resetLabel);
-    ring.style.setProperty('--quota-progress', `${progress}%`);
+    quota.style.setProperty('--quota-progress', `${progress}%`);
     ring.append(valueNode);
     copy.append(label, reset);
     quota.classList.add(`is-${level}`);
@@ -303,7 +310,7 @@ function groupList(groups, alertPercent, now) {
   const list = element('div', 'group-list');
   for (const group of groups.slice(0, 4)) {
     const row = element('div', 'group-row');
-    const label = element('span', 'group-label', group.label || 'Group');
+    const label = element('span', 'group-label', group.label || '分组');
     const metrics = element('span', 'group-metrics');
     for (const windowData of dataWindows(group).slice(0, 3)) {
       const metric = element('span', 'group-metric');
@@ -313,7 +320,7 @@ function groupList(groups, alertPercent, now) {
       const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
       const resetLabel = resetText(windowData.resetAt, now);
       const resetNode = element('span', 'reset-text', resetLabel);
-      resetNode.setAttribute('aria-label', `reset ${resetLabel}`);
+      resetNode.setAttribute('aria-label', `重置：${resetLabel}`);
       metric.classList.add(`is-${level}`);
       if (value === null) metric.classList.add('is-empty');
       metric.style.setProperty('--quota-progress', `${progress}%`);
@@ -360,10 +367,10 @@ function renderAgentCard(agent, metadata, alertPercent, now) {
   const values = (groups.length && (groups.length > 1 || !hasTopLevelUsage) ? groups.flatMap(dataWindows) : windows)
     .map((windowData) => (
       `${windowData.label || windowData.id} ${percentValue(windowData) ?? 'unavailable'} percent, `
-      + `reset ${resetText(windowData.resetAt, now)}`
+      + `重置 ${resetText(windowData.resetAt, now)}`
     ))
     .join('. ');
-  card.setAttribute('aria-label', `${agent.label || metadata.label} usage. ${values}. ${state.label}.`);
+  card.setAttribute('aria-label', `${agent.label || metadata.label} 配额。${values}。${state.label}。`);
   return { card, state };
 }
 
@@ -390,9 +397,58 @@ function saveSettings() {
   } catch {}
 }
 
+function serverConfigFromUsage(usage) {
+  const config = usage && usage.config && typeof usage.config === 'object' ? usage.config : {};
+  const bridges = config.bridges && typeof config.bridges === 'object' ? config.bridges : {};
+  return {
+    alertPercent: typeof config.alertPercent === 'number' ? config.alertPercent : DEFAULT_ALERT_PERCENT,
+    bridges: {
+      kimi: bridges.kimi !== false,
+      grok: bridges.grok !== false,
+    },
+  };
+}
+
+function setSettingsStatus(message, isError = false) {
+  const node = document.getElementById('settings_status');
+  if (!node) return;
+  node.textContent = message;
+  node.classList.toggle('is-error', isError);
+}
+
+async function saveServerConfig(patch) {
+  setSettingsStatus('正在保存…');
+  try {
+    const response = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!response.ok) throw new Error(`配置保存失败（${response.status}）`);
+    const payload = await response.json();
+    if (!payload || !payload.config) throw new Error('配置服务返回无效数据');
+    const base = latestUsage || { config: {}, agents: [] };
+    latestUsage = {
+      ...base,
+      config: {
+        ...base.config,
+        ...payload.config,
+      },
+    };
+    lastGoodUsage = latestUsage;
+    lastRenderSignature = null;
+    renderUsage(latestUsage);
+    setSettingsStatus('已保存到本机');
+    return true;
+  } catch (error) {
+    setSettingsStatus(error.message || '配置保存失败', true);
+    return false;
+  }
+}
+
 function settingsWindowHeight(agentCount) {
   const rows = Math.ceil(Math.max(0, agentCount) / 2);
-  return Math.min(600, Math.max(420, 290 + rows * 43));
+  return Math.min(640, Math.max(500, 370 + rows * 43));
 }
 
 function sendDesktopResize(width, height) {
@@ -408,7 +464,10 @@ function requestDesktopResize(layout) {
   if (resizeTimer) clearTimeout(resizeTimer);
   if (settingsOpen) {
     resizeTimer = null;
-    sendDesktopResize(Math.max(SETTINGS_MIN_WIDTH, layout.width), settingsWindowHeight(currentCatalog.length));
+    const settingsWidth = layout.density === 'strip'
+      ? SETTINGS_MIN_WIDTH
+      : Math.max(SETTINGS_MIN_WIDTH, layout.width);
+    sendDesktopResize(settingsWidth, settingsWindowHeight(currentCatalog.length));
     return;
   }
   if (settingsClosing) return;
@@ -417,6 +476,7 @@ function requestDesktopResize(layout) {
   const preserveScrollableHeight = Boolean(
     dashboard
     && dashboard.classList.contains('is-scrollable')
+    && layout.density !== 'strip'
     && layout.height < MAX_HUD_HEIGHT,
   );
   if (lastResizeWidth !== layout.width || layout.height === MAX_HUD_HEIGHT) {
@@ -443,7 +503,8 @@ function requestDesktopResize(layout) {
       if (readouts) readouts.scrollTop = readoutsScrollTop;
       measuredHeight = MAX_HUD_HEIGHT;
     }
-    sendDesktopResize(layout.width, Math.max(120, measuredHeight));
+    const minimumHeight = layout.density === 'strip' ? STRIP_MIN_HEIGHT : 120;
+    sendDesktopResize(layout.width, Math.max(minimumHeight, measuredHeight));
   }, 80);
 }
 
@@ -455,7 +516,7 @@ function applyLayout(agentCount) {
   dashboard.dataset.density = layout.density;
   dashboard.classList.toggle(
     'is-single-narrow',
-    agentCount === 1 && !wideSingleCard && layout.density !== 'comfortable',
+    agentCount === 1 && !wideSingleCard && layout.density !== 'comfortable' && layout.density !== 'strip',
   );
   if (layout.height === MAX_HUD_HEIGHT) dashboard.classList.add('is-scrollable');
   readouts.className = `readouts columns-${layout.columns}`;
@@ -522,8 +583,16 @@ function renderOffline(error) {
 
 const refreshUsage = createUsageRefresher(
   async () => {
-    const response = await fetch('/api/usage', { cache: 'no-store' });
+    const response = await fetch('/api/usage', {
+      cache: 'no-store',
+      headers: usageEtag ? { 'If-None-Match': usageEtag } : {},
+    });
+    if (response.status === 304) {
+      if (!lastGoodUsage) throw new Error('Usage API returned 304 before an initial response');
+      return lastGoodUsage;
+    }
     if (!response.ok) throw new Error(`Usage API returned ${response.status}`);
+    usageEtag = response.headers.get('etag') || null;
     return response.json();
   },
   (usage) => {
@@ -576,6 +645,16 @@ function renderSettingsChoices(now = Date.now()) {
 
   const density = document.querySelector(`input[name="density"][value="${currentSettings.density}"]`);
   if (density) density.checked = true;
+
+  const serverConfig = serverConfigFromUsage(latestUsage);
+  const alertInput = document.getElementById('alert_percent');
+  const alertValue = document.getElementById('alert_percent_value');
+  if (alertInput) alertInput.value = String(serverConfig.alertPercent);
+  if (alertValue) alertValue.textContent = `${serverConfig.alertPercent}%`;
+  const kimiBridge = document.getElementById('bridge_kimi');
+  const grokBridge = document.getElementById('bridge_grok');
+  if (kimiBridge) kimiBridge.checked = serverConfig.bridges.kimi;
+  if (grokBridge) grokBridge.checked = serverConfig.bridges.grok;
 }
 
 function setSettingsOpen(open) {
@@ -630,6 +709,10 @@ function installSettings() {
     currentSettings = normalizeSettings(null, currentCatalog);
     saveSettings();
     renderUsage(latestUsage || {});
+    void saveServerConfig({
+      alertPercent: DEFAULT_ALERT_PERCENT,
+      bridges: { kimi: true, grok: true },
+    });
   });
   for (const input of document.querySelectorAll('input[name="density"]')) {
     input.addEventListener('change', () => {
@@ -637,6 +720,23 @@ function installSettings() {
       currentSettings.density = input.value;
       saveSettings();
       renderUsage(latestUsage || {});
+    });
+  }
+  const alertInput = document.getElementById('alert_percent');
+  const alertValue = document.getElementById('alert_percent_value');
+  if (alertInput) {
+    alertInput.addEventListener('input', () => {
+      if (alertValue) alertValue.textContent = `${alertInput.value}%`;
+    });
+    alertInput.addEventListener('change', () => {
+      void saveServerConfig({ alertPercent: Number(alertInput.value) });
+    });
+  }
+  for (const [id, bridge] of [['bridge_kimi', 'kimi'], ['bridge_grok', 'grok']]) {
+    const input = document.getElementById(id);
+    if (!input) continue;
+    input.addEventListener('change', () => {
+      void saveServerConfig({ bridges: { [bridge]: input.checked } });
     });
   }
   document.addEventListener('keydown', (event) => {
@@ -686,7 +786,7 @@ function installDesktopDrag() {
 
   watch.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.target.closest('button, input, label, [data-no-drag]')) return;
-    if (event.target.closest('.watch.is-scrollable .readouts')) return;
+    if (event.target.closest('.watch.is-scrollable .readouts, .watch[data-density="strip"] .readouts')) return;
     pointerId = event.pointerId;
     watch.setPointerCapture(pointerId);
     window.desktopHud.beginDrag(event.screenX, event.screenY);

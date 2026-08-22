@@ -11,17 +11,21 @@
 // cli-chat-proxy host. It is never written to the snapshot, logged, or read
 // by the dashboard server.
 
-const fs = require('fs');
 const path = require('path');
 const os = require('os');
-
-function envNumber(name, fallback, options = {}) {
-  const value = Number(process.env[name]);
-  if (!Number.isFinite(value)) return fallback;
-  if (options.min !== undefined && value < options.min) return fallback;
-  if (options.max !== undefined && value > options.max) return fallback;
-  return value;
-}
+const {
+  acquireTokenLock,
+  envNumber,
+  hasUsableSnapshotWindows,
+  parseCliArgs: parseSnapshotCliArgs,
+  readJsonObject,
+  releaseTokenLock,
+  runSnapshotOnce,
+  runWatchLoop,
+  timestampMs,
+  writeCredentialWithBackup,
+  writeJsonAtomic: writeSnapshotAtomic,
+} = require('./lib/snapshot-core');
 
 const GROK_HOME = process.env.GROK_HOME
   || path.join(os.homedir(), '.grok');
@@ -48,42 +52,6 @@ const TOKEN_LOCK_STALE_MS = 30000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const SOURCE = 'grok-billing-credits';
 
-function writeSnapshotAtomic(filePath, data) {
-  const directory = path.dirname(filePath);
-  const temporaryPath = path.join(
-    directory,
-    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`,
-  );
-  fs.mkdirSync(directory, { recursive: true });
-  try {
-    fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(temporaryPath, filePath);
-  } catch (error) {
-    try {
-      fs.unlinkSync(temporaryPath);
-    } catch {}
-    throw error;
-  }
-}
-
-function readJsonObject(filePath) {
-  try {
-    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return data && typeof data === 'object' ? data : null;
-  } catch {
-    return null;
-  }
-}
-
-function timestampMs(value) {
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return value > 1e12 ? value : value > 1e9 ? value * 1000 : null;
-  }
-  if (typeof value !== 'string' || !value.trim()) return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
 function numberValue(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (value && typeof value === 'object' && 'val' in value) return numberValue(value.val);
@@ -99,35 +67,8 @@ function clampPercent(value) {
   return Math.round(Math.min(100, Math.max(0, value)) * 10) / 10;
 }
 
-function acquireTokenLock(lockPath, now = Date.now()) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const descriptor = fs.openSync(lockPath, 'wx');
-      try {
-        fs.writeFileSync(descriptor, `${process.pid}\n`);
-      } finally {
-        fs.closeSync(descriptor);
-      }
-      return true;
-    } catch (error) {
-      if (error && error.code === 'EEXIST') {
-        try {
-          if (now - fs.statSync(lockPath).mtimeMs > TOKEN_LOCK_STALE_MS) {
-            fs.unlinkSync(lockPath);
-            continue;
-          }
-        } catch {}
-      }
-      return false;
-    }
-  }
-  return false;
-}
-
-function releaseTokenLock(lockPath) {
-  try {
-    fs.unlinkSync(lockPath);
-  } catch {}
+function writeBackEnabled(env = process.env) {
+  return String(env.GROK_USAGE_WRITE_BACK || '').trim().toLowerCase() !== 'off';
 }
 
 function pickAuthEntry(authFile) {
@@ -174,6 +115,21 @@ function clientIdFromEntry(entry, slot = '') {
     if (maybe && maybe.trim()) return maybe.trim();
   }
   return DEFAULT_OAUTH_CLIENT_ID;
+}
+
+function validateGrokAuthFile(authFile, slot, expectedRefreshToken = '') {
+  if (!authFile || typeof authFile !== 'object' || Array.isArray(authFile)) return 'credential JSON is not an object';
+  const entry = authFile[slot];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return 'selected OAuth entry is missing';
+  if (typeof entry.key !== 'string' || !entry.key.trim()) return 'selected OAuth entry has no key';
+  if (typeof entry.refresh_token !== 'string' || !entry.refresh_token.trim()) {
+    return 'selected OAuth entry has no refresh_token';
+  }
+  if (!timestampMs(entry.expires_at)) return 'selected OAuth entry has invalid expires_at';
+  if (expectedRefreshToken && entry.refresh_token.trim() !== expectedRefreshToken) {
+    return 'credential changed while the token refresh was in flight';
+  }
+  return null;
 }
 
 async function refreshGrokOAuthToken(options = {}) {
@@ -229,17 +185,26 @@ async function refreshGrokOAuthToken(options = {}) {
   }
   const expiresIn = Number(payload.expires_in);
   const validExpiresIn = Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : 21600;
-  const nextEntry = {
-    ...picked.value,
-    key: accessToken,
-    refresh_token: typeof payload.refresh_token === 'string' && payload.refresh_token.trim()
-      ? payload.refresh_token.trim()
-      : refreshToken,
-    expires_at: new Date(Date.now() + validExpiresIn * 1000).toISOString(),
-    oidc_client_id: clientId,
-  };
-  const nextFile = { ...authFile, [picked.slot]: nextEntry };
-  writeSnapshotAtomic(authPath, nextFile);
+  writeCredentialWithBackup(
+    authPath,
+    (target) => ({
+      ...target,
+      [picked.slot]: {
+        ...target[picked.slot],
+        key: accessToken,
+        refresh_token: typeof payload.refresh_token === 'string' && payload.refresh_token.trim()
+          ? payload.refresh_token.trim()
+          : refreshToken,
+        expires_at: new Date(Date.now() + validExpiresIn * 1000).toISOString(),
+        oidc_client_id: clientId,
+      },
+    }),
+    (target) => validateGrokAuthFile(target, picked.slot, refreshToken),
+    {
+      writeBack: options.writeBack === undefined ? writeBackEnabled() : options.writeBack,
+      warn: options.warn || ((message) => console.warn(`[grok-usage-snapshot] ${message}`)),
+    },
+  );
   return accessToken;
 }
 
@@ -256,7 +221,7 @@ async function ensureGrokAccessToken(options = {}) {
   if (cached && !options.forceRefresh) return cached;
 
   const lockPath = `${authPath}.grok-usage.lock`;
-  const locked = acquireTokenLock(lockPath);
+  const locked = acquireTokenLock(lockPath, Date.now(), { staleMs: TOKEN_LOCK_STALE_MS });
   try {
     const reread = pickAuthEntry(readAuthFile(authPath));
     const usable = reread ? accessTokenFromEntry(reread.value) : null;
@@ -437,105 +402,42 @@ function buildGrokSnapshot(payload, now = Date.now(), options = {}) {
   };
 }
 
-function hasUsableSnapshotWindows(snapshot) {
-  if (!snapshot || typeof snapshot !== 'object') return false;
-  const windowsOk = Array.isArray(snapshot.windows) && snapshot.windows.some((windowData) => (
-    windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used)
-  ));
-  if (windowsOk) return true;
-  return Array.isArray(snapshot.groups) && snapshot.groups.some((group) => (
-    group
-    && Array.isArray(group.windows)
-    && group.windows.some((windowData) => (
-      windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used)
-    ))
-  ));
-}
-
-function readExistingSnapshot(filePath) {
-  return readJsonObject(filePath);
-}
-
 async function runOnce(options = {}) {
   const snapshotPath = options.snapshotPath || SNAPSHOT_PATH;
   const label = options.label || LABEL;
   const staleAfterMs = options.staleAfterMs || STALE_AFTER_MS;
   const now = options.now || (() => Date.now());
   const logger = options.logger || ((line) => console.log(`[grok-usage-snapshot] ${line}`));
-  try {
-    const payload = await fetchGrokUsage(options);
-    const snapshot = buildGrokSnapshot(payload, now(), { label, staleAfterMs });
-    writeSnapshotAtomic(snapshotPath, snapshot);
-    const summary = (snapshot.windows.length
+  return runSnapshotOnce({
+    buildSnapshot: (payload, timestamp) => buildGrokSnapshot(payload, timestamp, { label, staleAfterMs }),
+    fetchUsage: () => fetchGrokUsage(options),
+    includeGroups: true,
+    label,
+    logger,
+    now,
+    snapshotPath,
+    source: SOURCE,
+    staleAfterMs,
+    summarize: (snapshot) => (snapshot.windows.length
       ? snapshot.windows
       : snapshot.groups.flatMap((group) => group.windows.map((windowData) => ({
         ...windowData,
         label: `${group.label} ${windowData.label}`,
       }))))
       .map((windowData) => `${windowData.label} ${windowData.used}%`)
-      .join(' · ');
-    logger(`updated ${snapshotPath}: ${summary}`);
-    return { ok: true, snapshot };
-  } catch (error) {
-    const message = error && error.message ? error.message : String(error);
-    const existing = readExistingSnapshot(snapshotPath);
-    if (hasUsableSnapshotWindows(existing)) {
-      logger(`refresh failed (${message}); keeping last good snapshot`);
-      return { ok: false, keptLastGood: true, error: message };
-    }
-    const stub = {
-      label,
-      source: SOURCE,
-      fetchedAt: now(),
-      stale: true,
-      staleAfterMs,
-      error: message,
-      windows: [],
-      groups: [],
-    };
-    try {
-      writeSnapshotAtomic(snapshotPath, stub);
-    } catch {}
-    logger(`refresh failed (${message}); no previous snapshot available`);
-    return { ok: false, keptLastGood: false, error: message };
-  }
+      .join(' · '),
+  });
 }
 
 function parseCliArgs(argv) {
-  const args = { watch: false, intervalSeconds: WATCH_SECONDS };
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === '--watch' || arg === '-w') {
-      args.watch = true;
-      const next = Number(argv[index + 1]);
-      if (Number.isFinite(next) && next > 0) {
-        args.intervalSeconds = Math.min(3600, Math.max(30, next));
-        index += 1;
-      }
-    } else if (arg.startsWith('--interval=')) {
-      args.watch = true;
-      const next = Number(arg.slice('--interval='.length));
-      if (Number.isFinite(next) && next > 0) {
-        args.intervalSeconds = Math.min(3600, Math.max(30, next));
-      }
-    } else if (arg === '--once') {
-      args.watch = false;
-    }
-  }
-  return args;
+  return parseSnapshotCliArgs(argv, WATCH_SECONDS, {
+    defaultWriteBack: writeBackEnabled(),
+  });
 }
 
 if (require.main === module) {
   const args = parseCliArgs(process.argv.slice(2));
-  runOnce().then((result) => {
-    if (!args.watch) {
-      process.exitCode = result.ok ? 0 : 1;
-      return;
-    }
-    setInterval(() => {
-      runOnce().catch(() => {});
-    }, args.intervalSeconds * 1000);
-  });
+  runWatchLoop(() => runOnce({ writeBack: args.writeBack !== false }), args);
 }
 
 module.exports = {
@@ -552,5 +454,7 @@ module.exports = {
   productLabel,
   refreshGrokOAuthToken,
   runOnce,
+  validateGrokAuthFile,
+  writeBackEnabled,
   writeSnapshotAtomic,
 };

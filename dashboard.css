@@ -458,17 +458,28 @@ label:has(input:focus-visible) {
   display: flex;
   align-items: baseline;
   justify-content: center;
+  flex-wrap: wrap;
+  row-gap: 2px;
   width: 100%;
   min-width: 0;
   line-height: 1;
 }
 
 .quota-copy .window-label {
-  flex: 0 1 auto;
-  max-width: 42%;
+  flex: 0 0 auto;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.quota-copy .reset-text {
+  max-width: 100%;
+  overflow: visible;
+  text-align: center;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .window-label {
@@ -557,7 +568,7 @@ label:has(input:focus-visible) {
 .group-metric {
   --quota-color: var(--agent-accent);
   display: inline-grid;
-  grid-template-columns: auto auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: baseline;
   gap: 3.5px;
   min-width: 36px;
@@ -568,6 +579,10 @@ label:has(input:focus-visible) {
   font-size: 10px;
   font-weight: 600;
   opacity: 0.95;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 /* The grid gap already separates the value from the countdown, so the dot only
@@ -727,6 +742,10 @@ label:has(input:focus-visible) {
   font-size: 10px;
 }
 
+.settings-foot span.is-error {
+  color: var(--alert-text);
+}
+
 .icon-button {
   width: 32px;
   height: 32px;
@@ -860,7 +879,7 @@ label:has(input:focus-visible) {
 
 .density-choices {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 2px;
   min-height: 36px;
   padding: 2px;
@@ -903,6 +922,43 @@ label:has(input:focus-visible) {
   width: 1px;
   height: 1px;
   opacity: 0;
+}
+
+.alert-range {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--separator);
+  border-radius: 12px;
+  background: var(--row-background);
+}
+
+.alert-range label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--secondary);
+  font-size: 10px;
+  font-weight: 550;
+}
+
+.alert-range output {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.alert-range input {
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.bridge-choice .choice-copy span {
+  color: var(--tertiary);
 }
 
 .settings-foot {
@@ -997,6 +1053,250 @@ label:has(input:focus-visible) {
   font-size: 11.5px;
 }
 
+.watch[data-density="strip"] {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  width: calc(100vw - 8px);
+  min-height: 0;
+  padding: 6px;
+  border-radius: 16px;
+}
+
+.watch[data-density="strip"] .watch-head {
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 26px;
+  padding: 0 4px 0 0;
+  gap: 5px;
+}
+
+.watch[data-density="strip"] .watch-mark {
+  width: 16px;
+  height: 16px;
+  padding: 3px;
+  border-radius: 5px;
+}
+
+.watch[data-density="strip"] .watch-title strong {
+  font-size: 11.5px;
+}
+
+.watch[data-density="strip"] .watch-title span {
+  display: none;
+}
+
+.watch[data-density="strip"] .watch-actions {
+  gap: 5px;
+}
+
+.watch[data-density="strip"] .overall-state {
+  font-size: 9px;
+}
+
+.watch[data-density="strip"] .settings-toggle {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+}
+
+.watch[data-density="strip"] .readouts {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-color: var(--quaternary) transparent;
+  scrollbar-width: thin;
+  touch-action: pan-x;
+}
+
+.watch[data-density="strip"] .readouts::-webkit-scrollbar {
+  height: 4px;
+}
+
+.watch[data-density="strip"] .readouts::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--quaternary);
+}
+
+.watch[data-density="strip"] .readout {
+  display: flex;
+  align-items: center;
+  flex: 1 0 auto;
+  min-width: max-content;
+  min-height: 26px;
+  padding: 0 9px;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.watch[data-density="strip"] .readout + .readout {
+  border-left: 1px solid var(--separator);
+}
+
+.watch[data-density="strip"] .readout-head {
+  flex: 0 0 auto;
+  justify-content: flex-start;
+}
+
+.watch[data-density="strip"] .service-name {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.watch[data-density="strip"] .state {
+  padding: 2px 4px;
+  font-size: 9px;
+}
+
+.watch[data-density="strip"] .quota-grid {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 0 10px;
+}
+
+.watch[data-density="strip"] .quota {
+  display: grid;
+  grid-template-columns: auto auto auto;
+  grid-template-rows: auto 3px;
+  align-items: center;
+  justify-items: start;
+  column-gap: 4px;
+  row-gap: 2px;
+  min-width: max-content;
+  text-align: left;
+}
+
+.watch[data-density="strip"] .quota-ring {
+  display: block;
+  grid-column: 2;
+  grid-row: 1;
+  width: auto;
+  height: auto;
+}
+
+.watch[data-density="strip"] .quota-ring::before {
+  display: none;
+}
+
+.watch[data-density="strip"] .quota-copy {
+  display: contents;
+  width: auto;
+}
+
+.watch[data-density="strip"] .quota-copy .window-label {
+  grid-column: 1;
+  grid-row: 1;
+  max-width: none;
+  overflow: visible;
+  font-size: 9.5px;
+  text-overflow: clip;
+}
+
+.watch[data-density="strip"] .quota-value {
+  font-size: 12px;
+}
+
+.watch[data-density="strip"] .quota-copy .reset-text {
+  grid-column: 3;
+  grid-row: 1;
+  max-width: none;
+  overflow: visible;
+  font-size: 10px;
+  text-align: left;
+  text-overflow: clip;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.watch[data-density="strip"] .quota::after {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  width: 100%;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--quota-color) var(--quota-progress),
+    var(--ring-track) 0
+  );
+  content: "";
+}
+
+.watch[data-density="strip"] .group-list {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 10px;
+  margin: 0 0 0 10px;
+}
+
+.watch[data-density="strip"] .group-row {
+  gap: 4px;
+  min-width: max-content;
+}
+
+.watch[data-density="strip"] .group-label {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow: visible;
+  font-size: 9.5px;
+  text-overflow: clip;
+}
+
+.watch[data-density="strip"] .group-metrics {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.watch[data-density="strip"] .group-metric {
+  grid-template-columns: auto auto auto;
+  grid-template-rows: auto 3px;
+  align-items: center;
+  gap: 2px 4px;
+  min-width: max-content;
+}
+
+.watch[data-density="strip"] .group-metric .window-label {
+  overflow: visible;
+  font-size: 9.5px;
+  text-overflow: clip;
+}
+
+.watch[data-density="strip"] .group-metric .quota-value {
+  font-size: 12px;
+}
+
+.watch[data-density="strip"] .group-metric .reset-text {
+  overflow: visible;
+  font-size: 10px;
+  text-overflow: clip;
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+.watch[data-density="strip"] .group-metric::after {
+  grid-row: 2;
+  height: 3px;
+}
+
+.watch[data-density="strip"] .no-quota {
+  margin: 0 0 0 9px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
 html.desktop-shell,
 body.desktop-shell {
   background: transparent;
@@ -1087,6 +1387,12 @@ body.desktop-shell .watch.is-settings-open {
   background-size: 200% 100%;
   content: "";
   animation: skeleton-shimmer 1.5s linear infinite;
+}
+
+.watch[data-density="strip"][aria-busy="true"] .readouts:empty::before,
+.watch[data-density="strip"][aria-busy="true"] .readouts:empty::after {
+  height: 24px;
+  border-radius: 8px;
 }
 
 @keyframes quota-flash {
