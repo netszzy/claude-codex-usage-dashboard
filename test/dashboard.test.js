@@ -23,6 +23,7 @@ const {
   resolveLayout,
   settingsWindowHeight,
   serviceState,
+  stripMiniContentWidth,
   usageSignature,
 } = require('../dashboard');
 
@@ -247,13 +248,27 @@ test('adaptive layout changes density and columns with the selected agent count'
   assert.deepEqual(resolveLayout(6, 'strip-mini'), {
     columns: 1,
     density: 'strip-mini',
-    width: 32768,
+    width: 240,
     height: 40,
   });
   assert.equal(resolveLayout(9, 'comfortable').height, 640);
   assert.equal(resolveLayout(11, 'standard').height, 640);
   assert.equal(resolveLayout(19, 'auto').height, 640);
   assert.equal(resolveLayout(32, 'auto').height, 640);
+});
+
+test('strip-mini width fits the rendered Agent content instead of the display width', () => {
+  const dashboard = { getBoundingClientRect: () => ({ width: 372 }) };
+  const readouts = {
+    getBoundingClientRect: () => ({ width: 320 }),
+    children: [
+      { getBoundingClientRect: () => ({ width: 116 }) },
+      { getBoundingClientRect: () => ({ width: 130 }) },
+    ],
+  };
+
+  assert.equal(stripMiniContentWidth(dashboard, readouts, 240), 309);
+  assert.equal(stripMiniContentWidth(dashboard, { getBoundingClientRect: () => ({ width: 320 }), children: [] }, 240), 240);
 });
 
 test('polling does not replay an estimated height after the target width was requested', async () => {
@@ -410,7 +425,10 @@ test('strip-mini layout drops live/offline chips, abbreviates agent names, and t
   assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.state\s*\{[^}]*display:\s*none;/s);
   assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.overall-state\s*\{[^}]*display:\s*none;/s);
   assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.watch-title\s*\{[^}]*display:\s*none;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\]\s*\{[^}]*width:\s*max-content;[^}]*max-width:\s*calc\(100vw - 8px\);/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.readouts\s*\{[^}]*gap:\s*3px;/s);
   assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.group-label\s*\{[^}]*font-weight:\s*700;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.readout\s*\{[^}]*flex:\s*0 0 auto;/s);
   assert.match(script, /compact \? abbreviateGroupLabel\(fullGroupLabel\) : fullGroupLabel/);
   assert.match(script, /compact \? resetText\(windowData\.resetAt, now, true\) : resetFull/);
   assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.quota\.is-empty\s*,\s*\.watch\[data-density="strip-mini"\] \.group-metric\.is-empty\s*\{[^}]*display:\s*none;/s);

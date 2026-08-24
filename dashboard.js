@@ -6,7 +6,9 @@ const SETTINGS_MIN_WIDTH = 480;
 const SETTINGS_KEY = 'usage-watch.settings.v1';
 const STRIP_REQUEST_WIDTH = 32768;
 const STRIP_MIN_HEIGHT = 48;
+const STRIP_MINI_MIN_WIDTH = 240;
 const STRIP_MINI_MIN_HEIGHT = 40;
+const STRIP_MINI_AGENT_GAP = 3;
 const DENSITIES = new Set(['auto', 'compact', 'comfortable', 'strip', 'strip-mini']);
 const AGENT_ABBREVIATIONS = {
   claude: 'CC',
@@ -162,7 +164,7 @@ function resolveLayout(agentCount, density = 'auto', wideSingleCard = false) {
     return {
       columns: 1,
       density,
-      width: STRIP_REQUEST_WIDTH,
+      width: density === 'strip-mini' ? STRIP_MINI_MIN_WIDTH : STRIP_REQUEST_WIDTH,
       height: density === 'strip-mini' ? STRIP_MINI_MIN_HEIGHT : STRIP_MIN_HEIGHT,
     };
   }
@@ -506,6 +508,26 @@ function sendDesktopResize(width, height) {
   window.desktopHud.resize(width, height);
 }
 
+function stripMiniContentWidth(dashboard, readouts, fallbackWidth) {
+  if (
+    !dashboard
+    || !readouts
+    || typeof dashboard.getBoundingClientRect !== 'function'
+    || typeof readouts.getBoundingClientRect !== 'function'
+  ) {
+    return fallbackWidth;
+  }
+  const dashboardWidth = dashboard.getBoundingClientRect().width;
+  const readoutsWidth = readouts.getBoundingClientRect().width;
+  const cards = Array.from(readouts.children);
+  const contentWidth = cards.reduce((total, child) => total + child.getBoundingClientRect().width, 0)
+    + Math.max(0, cards.length - 1) * STRIP_MINI_AGENT_GAP;
+  if (!Number.isFinite(dashboardWidth) || !Number.isFinite(readoutsWidth) || !contentWidth) {
+    return fallbackWidth;
+  }
+  return Math.max(STRIP_MINI_MIN_WIDTH, Math.ceil(dashboardWidth - readoutsWidth + contentWidth + 8));
+}
+
 function requestDesktopResize(layout) {
   if (!window.desktopHud || typeof window.desktopHud.resize !== 'function') return;
   if (resizeTimer) clearTimeout(resizeTimer);
@@ -526,7 +548,8 @@ function requestDesktopResize(layout) {
     && !isStripDensity(layout.density)
     && layout.height < MAX_HUD_HEIGHT,
   );
-  if (lastResizeWidth !== layout.width || layout.height === MAX_HUD_HEIGHT) {
+  const contentSizedStrip = layout.density === 'strip-mini';
+  if (!contentSizedStrip && (lastResizeWidth !== layout.width || layout.height === MAX_HUD_HEIGHT)) {
     sendDesktopResize(layout.width, preserveScrollableHeight ? MAX_HUD_HEIGHT : layout.height);
   }
   resizeTimer = setTimeout(() => {
@@ -553,7 +576,10 @@ function requestDesktopResize(layout) {
     const minimumHeight = layout.density === 'strip'
       ? STRIP_MIN_HEIGHT
       : layout.density === 'strip-mini' ? STRIP_MINI_MIN_HEIGHT : 120;
-    sendDesktopResize(layout.width, Math.max(minimumHeight, measuredHeight));
+    const measuredWidth = contentSizedStrip
+      ? stripMiniContentWidth(dashboard, readouts, layout.width)
+      : layout.width;
+    sendDesktopResize(measuredWidth, Math.max(minimumHeight, measuredHeight));
   }, 80);
 }
 
@@ -878,6 +904,7 @@ module.exports = {
   resolveLayout,
   settingsWindowHeight,
   serviceState,
+  stripMiniContentWidth,
   usageSignature,
 };
 }

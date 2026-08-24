@@ -1305,12 +1305,13 @@ label:has(input:focus-visible) {
    units, and the bar is thicker. */
 .watch[data-density="strip-mini"] {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, max-content);
   align-items: center;
-  width: calc(100vw - 8px);
+  width: max-content;
+  max-width: calc(100vw - 8px);
   min-height: 0;
-  padding: 5px;
-  border-radius: 14px;
+  padding: 3px;
+  border-radius: 12px;
 }
 
 .watch[data-density="strip-mini"] .watch-head {
@@ -1318,8 +1319,8 @@ label:has(input:focus-visible) {
   grid-column: 1;
   grid-row: 1;
   min-height: 22px;
-  padding: 0 4px 0 0;
-  gap: 4px;
+  padding: 0 2px 0 0;
+  gap: 3px;
 }
 
 .watch[data-density="strip-mini"] .watch-mark {
@@ -1353,7 +1354,7 @@ label:has(input:focus-visible) {
   grid-row: 1;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 0;
+  gap: 3px;
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-x: contain;
@@ -1374,10 +1375,10 @@ label:has(input:focus-visible) {
 .watch[data-density="strip-mini"] .readout {
   display: flex;
   align-items: center;
-  flex: 1 0 auto;
+  flex: 0 0 auto;
   min-width: max-content;
   min-height: 22px;
-  padding: 0 7px;
+  padding: 0 5px;
   overflow: visible;
   border: 0;
   border-radius: 0;
@@ -1386,7 +1387,7 @@ label:has(input:focus-visible) {
 }
 
 .watch[data-density="strip-mini"] .readout + .readout {
-  border-left: 1px solid var(--separator);
+  border-left: 0;
 }
 
 .watch[data-density="strip-mini"] .readout-head {
@@ -1429,8 +1430,8 @@ label:has(input:focus-visible) {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
-  margin: 0 0 0 7px;
+  gap: 4px;
+  margin: 0 0 0 5px;
 }
 
 .watch[data-density="strip-mini"] .quota {
@@ -1439,7 +1440,7 @@ label:has(input:focus-visible) {
   grid-template-rows: auto 6px;
   align-items: center;
   justify-items: start;
-  column-gap: 4px;
+  column-gap: 3px;
   row-gap: 3px;
   min-width: max-content;
   text-align: left;
@@ -1505,8 +1506,8 @@ label:has(input:focus-visible) {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
-  gap: 8px;
-  margin: 0 0 0 7px;
+  gap: 6px;
+  margin: 0 0 0 5px;
 }
 
 .watch[data-density="strip-mini"] .group-row {
@@ -1532,14 +1533,14 @@ label:has(input:focus-visible) {
 .watch[data-density="strip-mini"] .group-metrics {
   flex: 0 0 auto;
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: 4px;
 }
 
 .watch[data-density="strip-mini"] .group-metric {
   grid-template-columns: auto auto auto;
   grid-template-rows: auto 6px;
   align-items: center;
-  gap: 3px 4px;
+  gap: 3px;
   min-width: max-content;
 }
 
@@ -1568,7 +1569,7 @@ label:has(input:focus-visible) {
 }
 
 .watch[data-density="strip-mini"] .no-quota {
-  margin: 0 0 0 7px;
+  margin: 0 0 0 5px;
   font-size: 9.5px;
   white-space: nowrap;
 }
@@ -1619,6 +1620,11 @@ body.desktop-shell {
 body.desktop-shell .watch {
   width: calc(100vw - 8px);
   min-height: 0;
+}
+
+body.desktop-shell .watch[data-density="strip-mini"] {
+  width: max-content;
+  max-width: calc(100vw - 8px);
 }
 
 body.desktop-shell .watch.is-scrollable {
