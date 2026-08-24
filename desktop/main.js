@@ -63,7 +63,7 @@ const DEFAULT_WIDTH = 380;
 const DEFAULT_HEIGHT = 224;
 const MIN_HUD_WIDTH = 240;
 const MAX_HUD_WIDTH = 32768;
-const MIN_HUD_HEIGHT = 48;
+const MIN_HUD_HEIGHT = 40;
 const MAX_HUD_HEIGHT = 640;
 
 // Fractional display scaling can make window.getBounds() report a width/height

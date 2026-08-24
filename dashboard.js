@@ -6,7 +6,19 @@ const SETTINGS_MIN_WIDTH = 480;
 const SETTINGS_KEY = 'usage-watch.settings.v1';
 const STRIP_REQUEST_WIDTH = 32768;
 const STRIP_MIN_HEIGHT = 48;
-const DENSITIES = new Set(['auto', 'compact', 'comfortable', 'strip']);
+const STRIP_MINI_MIN_HEIGHT = 40;
+const DENSITIES = new Set(['auto', 'compact', 'comfortable', 'strip', 'strip-mini']);
+const AGENT_ABBREVIATIONS = {
+  claude: 'CC',
+  codex: 'CX',
+  antigravity: 'AG',
+  kimi: 'KC',
+  grok: 'GK',
+  gemini: 'GM',
+  'github-copilot': 'GH',
+  cursor: 'CR',
+  opencode: 'OC',
+};
 
 let latestUsage = null;
 let lastGoodUsage = null;
@@ -38,13 +50,18 @@ function ageText(timestamp, now = Date.now()) {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 
-function resetText(timestamp, now = Date.now()) {
-  if (!timestamp) return '无重置时间';
+function resetText(timestamp, now = Date.now(), compact = false) {
+  if (!timestamp) return compact ? '--' : '无重置时间';
   const seconds = Math.floor((timestamp - now) / 1000);
-  if (seconds <= 0) return '已到期';
+  if (seconds <= 0) return compact ? '到期' : '已到期';
   const days = Math.floor(seconds / 86400);
   const hours = Math.floor((seconds % 86400) / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
+  if (compact) {
+    if (days > 0) return `${days}天${hours}时`;
+    if (hours > 0) return `${hours}时${minutes}分`;
+    return `${Math.max(0, minutes)}分`;
+  }
   if (days > 0) return `${days} 天 ${hours} 小时`;
   if (hours > 0) return `${hours} 小时 ${minutes} 分钟`;
   return `${Math.max(0, minutes)} 分钟`;
@@ -119,13 +136,34 @@ function normalizeSettings(raw, catalog = []) {
   return { visibleAgents, density };
 }
 
+function isStripDensity(density) {
+  return density === 'strip' || density === 'strip-mini';
+}
+
+function abbreviateLabel(id, label) {
+  if (AGENT_ABBREVIATIONS[id]) return AGENT_ABBREVIATIONS[id];
+  const words = String(label || id || '').trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return String(label || id || '').slice(0, 2).toUpperCase();
+}
+
+function abbreviateGroupLabel(label) {
+  const text = String(label || '').trim();
+  if (!text) return 'G';
+  if (/gemini/i.test(text)) return 'GM';
+  if (/claude|gpt|3p/i.test(text)) return 'CG';
+  const words = text.split(/\s+/).filter((word) => !/^(and|or|of|the|for|with)$/i.test(word));
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return text.slice(0, 2).toUpperCase();
+}
+
 function resolveLayout(agentCount, density = 'auto', wideSingleCard = false) {
-  if (density === 'strip') {
+  if (isStripDensity(density)) {
     return {
       columns: 1,
-      density: 'strip',
+      density,
       width: STRIP_REQUEST_WIDTH,
-      height: STRIP_MIN_HEIGHT,
+      height: density === 'strip-mini' ? STRIP_MINI_MIN_HEIGHT : STRIP_MIN_HEIGHT,
     };
   }
   const resolvedDensity = density === 'auto'
@@ -281,7 +319,7 @@ function quotaTitle(labelText, value, resetLabel) {
   return `${labelText} ${value === null ? '--' : `${value}%`}，重置：${resetLabel}`;
 }
 
-function quotaGrid(windows, alertPercent, now) {
+function quotaGrid(windows, alertPercent, now, compact = false) {
   const grid = element('div', 'quota-grid');
   for (const windowData of windows.slice(0, 4)) {
     const quota = element('div', 'quota');
@@ -290,11 +328,12 @@ function quotaGrid(windows, alertPercent, now) {
     const labelText = windowData.label || String(windowData.id || 'quota').toUpperCase();
     const label = element('span', 'window-label', labelText);
     const { level, value, valueNode } = quotaValueElement(windowData, alertPercent);
-    const resetLabel = resetText(windowData.resetAt, now);
+    const resetFull = resetText(windowData.resetAt, now);
+    const resetLabel = compact ? resetText(windowData.resetAt, now, true) : resetFull;
     const reset = element('span', 'reset-text', resetLabel);
-    reset.setAttribute('aria-label', `重置：${resetLabel}`);
+    reset.setAttribute('aria-label', `重置：${resetFull}`);
     const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
-    quota.title = quotaTitle(labelText, value, resetLabel);
+    quota.title = quotaTitle(labelText, value, resetFull);
     quota.style.setProperty('--quota-progress', `${progress}%`);
     ring.append(valueNode);
     copy.append(label, reset);
@@ -306,11 +345,13 @@ function quotaGrid(windows, alertPercent, now) {
   return grid;
 }
 
-function groupList(groups, alertPercent, now) {
+function groupList(groups, alertPercent, now, compact = false) {
   const list = element('div', 'group-list');
   for (const group of groups.slice(0, 4)) {
     const row = element('div', 'group-row');
-    const label = element('span', 'group-label', group.label || '分组');
+    const fullGroupLabel = group.label || '分组';
+    const label = element('span', 'group-label', compact ? abbreviateGroupLabel(fullGroupLabel) : fullGroupLabel);
+    if (compact) label.title = fullGroupLabel;
     const metrics = element('span', 'group-metrics');
     for (const windowData of dataWindows(group).slice(0, 3)) {
       const metric = element('span', 'group-metric');
@@ -318,13 +359,14 @@ function groupList(groups, alertPercent, now) {
       const windowLabel = element('span', 'window-label', labelText);
       const { level, value, valueNode } = quotaValueElement(windowData, alertPercent);
       const progress = value === null ? 0 : Math.max(0, Math.min(100, value));
-      const resetLabel = resetText(windowData.resetAt, now);
+      const resetFull = resetText(windowData.resetAt, now);
+      const resetLabel = compact ? resetText(windowData.resetAt, now, true) : resetFull;
       const resetNode = element('span', 'reset-text', resetLabel);
-      resetNode.setAttribute('aria-label', `重置：${resetLabel}`);
+      resetNode.setAttribute('aria-label', `重置：${resetFull}`);
       metric.classList.add(`is-${level}`);
       if (value === null) metric.classList.add('is-empty');
       metric.style.setProperty('--quota-progress', `${progress}%`);
-      metric.title = quotaTitle(labelText, value, resetLabel);
+      metric.title = quotaTitle(labelText, value, resetFull);
       metric.append(windowLabel, valueNode, resetNode);
       metrics.append(metric);
     }
@@ -334,7 +376,7 @@ function groupList(groups, alertPercent, now) {
   return list;
 }
 
-function renderAgentCard(agent, metadata, alertPercent, now) {
+function renderAgentCard(agent, metadata, alertPercent, now, density = 'auto') {
   const card = element('article', 'readout');
   card.id = `card_${agent.id}`;
   card.style.setProperty('--agent-accent', agent.accent || metadata.accent || '#8ca0b3');
@@ -342,8 +384,12 @@ function renderAgentCard(agent, metadata, alertPercent, now) {
   const header = element('header', 'readout-head');
   const name = element('span', 'service-name');
   name.id = `label_${agent.id}`;
-  name.append(element('i', 'dot'), document.createTextNode(agent.label || metadata.label));
   const state = serviceState(agent, now);
+  const fullLabel = agent.label || metadata.label;
+  const displayLabel = density === 'strip-mini' ? abbreviateLabel(metadata.id, fullLabel) : fullLabel;
+  if (density === 'strip-mini') name.title = fullLabel;
+  name.classList.add(`is-${state.kind}`);
+  name.append(element('i', 'dot'), document.createTextNode(displayLabel));
   const stateNode = element('span', `state is-${state.kind}`, state.label);
   stateNode.title = agent.error || '';
   header.append(name, stateNode);
@@ -352,15 +398,16 @@ function renderAgentCard(agent, metadata, alertPercent, now) {
   const groups = Array.isArray(agent.groups) ? agent.groups.filter((group) => hasUsageData(group)) : [];
   const windows = dataWindows(agent);
   const hasTopLevelUsage = windows.some((windowData) => percentValue(windowData) !== null);
+  const compact = density === 'strip-mini';
   if (groups.length && (groups.length > 1 || !hasTopLevelUsage)) {
     card.classList.add('has-groups');
-    card.append(groupList(groups, alertPercent, now));
+    card.append(groupList(groups, alertPercent, now, compact));
   } else if (windows.length) {
-    card.append(quotaGrid(windows, alertPercent, now));
+    card.append(quotaGrid(windows, alertPercent, now, compact));
   } else {
     const message = metadata.bridgeFile
-      ? `等待本地快照 ${metadata.bridgeFile}`
-      : '等待 Agent 产生额度数据';
+      ? (density === 'strip-mini' ? '等待快照' : `等待本地快照 ${metadata.bridgeFile}`)
+      : (density === 'strip-mini' ? '等待数据' : '等待 Agent 产生额度数据');
     card.append(element('span', 'no-quota', message));
   }
 
@@ -464,7 +511,7 @@ function requestDesktopResize(layout) {
   if (resizeTimer) clearTimeout(resizeTimer);
   if (settingsOpen) {
     resizeTimer = null;
-    const settingsWidth = layout.density === 'strip'
+    const settingsWidth = isStripDensity(layout.density)
       ? SETTINGS_MIN_WIDTH
       : Math.max(SETTINGS_MIN_WIDTH, layout.width);
     sendDesktopResize(settingsWidth, settingsWindowHeight(currentCatalog.length));
@@ -476,7 +523,7 @@ function requestDesktopResize(layout) {
   const preserveScrollableHeight = Boolean(
     dashboard
     && dashboard.classList.contains('is-scrollable')
-    && layout.density !== 'strip'
+    && !isStripDensity(layout.density)
     && layout.height < MAX_HUD_HEIGHT,
   );
   if (lastResizeWidth !== layout.width || layout.height === MAX_HUD_HEIGHT) {
@@ -503,7 +550,9 @@ function requestDesktopResize(layout) {
       if (readouts) readouts.scrollTop = readoutsScrollTop;
       measuredHeight = MAX_HUD_HEIGHT;
     }
-    const minimumHeight = layout.density === 'strip' ? STRIP_MIN_HEIGHT : 120;
+    const minimumHeight = layout.density === 'strip'
+      ? STRIP_MIN_HEIGHT
+      : layout.density === 'strip-mini' ? STRIP_MINI_MIN_HEIGHT : 120;
     sendDesktopResize(layout.width, Math.max(minimumHeight, measuredHeight));
   }, 80);
 }
@@ -516,7 +565,7 @@ function applyLayout(agentCount) {
   dashboard.dataset.density = layout.density;
   dashboard.classList.toggle(
     'is-single-narrow',
-    agentCount === 1 && !wideSingleCard && layout.density !== 'comfortable' && layout.density !== 'strip',
+    agentCount === 1 && !wideSingleCard && layout.density !== 'comfortable' && !isStripDensity(layout.density),
   );
   if (layout.height === MAX_HUD_HEIGHT) dashboard.classList.add('is-scrollable');
   readouts.className = `readouts columns-${layout.columns}`;
@@ -559,7 +608,7 @@ function renderUsage(usage, now = Date.now()) {
       windows: [],
       groups: [],
     };
-    const rendered = renderAgentCard(agent, metadata, alertPercent, now);
+    const rendered = renderAgentCard(agent, metadata, alertPercent, now, currentSettings.density);
     const cardSignature = JSON.stringify(agentSignature(agent));
     if (previousCardSignatures.get(id) && previousCardSignatures.get(id) !== cardSignature) {
       rendered.card.classList.add('is-updated');
@@ -786,7 +835,7 @@ function installDesktopDrag() {
 
   watch.addEventListener('pointerdown', (event) => {
     if (event.button !== 0 || event.target.closest('button, input, label, [data-no-drag]')) return;
-    if (event.target.closest('.watch.is-scrollable .readouts, .watch[data-density="strip"] .readouts')) return;
+    if (event.target.closest('.watch.is-scrollable .readouts, .watch[data-density^="strip"] .readouts')) return;
     pointerId = event.pointerId;
     watch.setPointerCapture(pointerId);
     window.desktopHud.beginDrag(event.screenX, event.screenY);
@@ -811,6 +860,8 @@ function init() {
 
 if (typeof module !== 'undefined' && module.exports) {
 module.exports = {
+  abbreviateGroupLabel,
+  abbreviateLabel,
   ageText,
   agentSignature,
   choiceState,

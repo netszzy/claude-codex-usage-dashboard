@@ -63,6 +63,14 @@ test('wide strip resize fills the available display width at its compact height'
 
   assert.deepEqual(resized, { x: 0, y: 968, width: 1920, height: 48 });
   assert.equal(resized.y + resized.height, current.y + current.height);
+
+  const mini = resizeBoundsFromBottomRight(
+    current,
+    { width: 32768, height: 40 },
+    { x: 0, y: 0, width: 1920, height: 1040 },
+  );
+  assert.deepEqual(mini, { x: 0, y: 976, width: 1920, height: 40 });
+  assert.equal(mini.y + mini.height, current.y + current.height);
 });
 
 test('desktop shell re-clamps the current window when display geometry changes', () => {
@@ -81,7 +89,7 @@ test('desktop resize accepts full-width strip requests while retaining safe limi
   const source = fs.readFileSync(path.join(__dirname, '..', 'desktop', 'main.js'), 'utf8');
 
   assert.match(source, /const MAX_HUD_WIDTH = 32768;/);
-  assert.match(source, /const MIN_HUD_HEIGHT = 48;/);
+  assert.match(source, /const MIN_HUD_HEIGHT = 40;/);
   assert.match(source, /width < MIN_HUD_WIDTH \|\| width > MAX_HUD_WIDTH/);
   assert.match(source, /height < MIN_HUD_HEIGHT \|\| height > MAX_HUD_HEIGHT/);
 });

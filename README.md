@@ -7,9 +7,9 @@
 ## 功能
 
 - 自动显示 Claude Code、Codex 和 Antigravity 的 5 小时与 7 天窗口。
-- 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展卡片与横向信息条间切换。
+- 内置配置菜单，可自由选择显示的 Agent，并在自适应、紧凑、舒展卡片、横向信息条与极简条间切换。
 - 配置菜单可直接调整告警阈值与 Kimi/Grok 自动桥接开关，保存后重启不丢失。
-- 悬浮窗按已选 Agent 数量自动调整为 1～3 列；横向信息条会扩展到当前显示器宽度，并以进度条代替圆环。
+- 悬浮窗按已选 Agent 数量自动调整为 1～3 列；横向信息条和极简条会扩展到当前显示器宽度，并以进度条代替圆环。
 - 通过本地额度快照桥接 Kimi Code、Grok、Gemini CLI、GitHub Copilot、Cursor、OpenCode 和任意自定义 Agent。
 - 内置 kimi-usage-snapshot.js，用本机 Kimi Code CLI 登录态读取官方 /usages 接口并写入快照。
 - 内置 grok-usage-snapshot.js，用本机 Grok CLI OAuth 登录态读取官方 billing credits 接口并写入快照。
@@ -67,7 +67,7 @@ Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现�
 点击悬浮窗右上角的“配置”：
 
 1. 勾选需要显示的 Agent；未连接的预设会标记为“等待快照”。
-2. 选择“自适应”“紧凑”“舒展”卡片样式，或选择“横向条”以单行进度条方式展示所有 Agent。
+2. 选择“自适应”“紧凑”“舒展”卡片样式，或选择“横向条”以单行进度条方式展示所有 Agent。“极简条”再收一档：Agent 名改用缩写（Claude Code→CC、Codex→CX），Antigravity 的 Gemini / Claude-GPT 系列标成 GM / CG，LIVE/STALE/OFFLINE 改由色点表示，重置倒计时改成 `6时16分` 这种短写法，进度条加粗，窗口高度约 40px。
 3. 调整 50%～95% 的告警阈值，以及 Kimi Code、Grok 的自动刷新开关。
 
 显示 Agent 与布局样式写入 Electron 页面的本地存储；告警阈值与桥接开关写入 `%USERPROFILE%\.claude-codex-usage-dashboard\dashboard-config.json`。这两类设置都不修改 Agent 配置或凭据。`ALERT_PERCENT`、`KIMI_USAGE_BRIDGE`、`GROK_USAGE_BRIDGE` 环境变量仍可覆盖本机保存值。

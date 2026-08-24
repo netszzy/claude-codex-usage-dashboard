@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const {
+  abbreviateGroupLabel,
+  abbreviateLabel,
   ageText,
   agentSignature,
   choiceState,
@@ -28,6 +30,10 @@ test('expired reset timestamps are not projected into a future cycle', () => {
   const now = Date.UTC(2026, 6, 10, 12, 0, 0);
   assert.equal(resetText(now - 60_000, now), '已到期');
   assert.equal(resetText(now + 90 * 60_000, now), '1 小时 30 分钟');
+  assert.equal(resetText(now - 60_000, now, true), '到期');
+  assert.equal(resetText(now + 90 * 60_000, now, true), '1时30分');
+  assert.equal(resetText(now + (2 * 86400 + 4 * 3600) * 1000, now, true), '2天4时');
+  assert.equal(resetText(null, now, true), '--');
 });
 
 test('the configured alert threshold controls the alert state', () => {
@@ -238,6 +244,12 @@ test('adaptive layout changes density and columns with the selected agent count'
     width: 32768,
     height: 48,
   });
+  assert.deepEqual(resolveLayout(6, 'strip-mini'), {
+    columns: 1,
+    density: 'strip-mini',
+    width: 32768,
+    height: 40,
+  });
   assert.equal(resolveLayout(9, 'comfortable').height, 640);
   assert.equal(resolveLayout(11, 'standard').height, 640);
   assert.equal(resolveLayout(19, 'auto').height, 640);
@@ -328,6 +340,13 @@ test('polling does not replay an estimated height after the target width was req
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     assert.deepEqual(resizeCalls, [[480, 48]]);
+
+    resizeCalls.length = 0;
+    dashboardHeight = 28;
+    requestDesktopResize({ width: 480, height: 40, density: 'strip-mini' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.deepEqual(resizeCalls, [[480, 40]]);
   } finally {
     if (originalWindow === undefined) delete global.window;
     else global.window = originalWindow;
@@ -345,7 +364,8 @@ test('settings window is tall enough for built-in choices and capped for long ca
 test('main quota card keeps reset countdowns visible and legible at standard density', () => {
   const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
   const hiddenResetRules = Array.from(stylesheet.matchAll(/([^{}]+)\{([^{}]+)\}/g))
-    .filter(([, selector, body]) => selector.includes('.reset-text') && /display\s*:\s*none/.test(body));
+    .filter(([, selector, body]) => selector.includes('.reset-text') && /display\s*:\s*none/.test(body))
+    .map(([, selector]) => selector.trim());
   const script = fs.readFileSync(path.join(__dirname, '..', 'dashboard.js'), 'utf8');
 
   assert.deepEqual(hiddenResetRules, []);
@@ -379,6 +399,39 @@ test('horizontal strip layout keeps all agents in one scrolling row with bar pro
   assert.match(stylesheet, /\.watch\[data-density="strip"\] \.readouts\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
   assert.match(stylesheet, /\.watch\[data-density="strip"\] \.quota-ring::before\s*\{[^}]*display:\s*none;/s);
   assert.match(stylesheet, /\.watch\[data-density="strip"\] \.quota::after\s*\{[^}]*height:\s*3px;[^}]*background:\s*linear-gradient/s);
+});
+
+test('strip-mini layout drops live/offline chips, abbreviates agent names, and thickens the bar', () => {
+  const stylesheet = fs.readFileSync(path.join(__dirname, '..', 'dashboard.css'), 'utf8');
+  const markup = fs.readFileSync(path.join(__dirname, '..', 'dashboard.html'), 'utf8');
+  const script = fs.readFileSync(path.join(__dirname, '..', 'dashboard.js'), 'utf8');
+
+  assert.match(markup, /input type="radio" name="density" value="strip-mini">极简条/);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.state\s*\{[^}]*display:\s*none;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.overall-state\s*\{[^}]*display:\s*none;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.watch-title\s*\{[^}]*display:\s*none;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.group-label\s*\{[^}]*font-weight:\s*700;/s);
+  assert.match(script, /compact \? abbreviateGroupLabel\(fullGroupLabel\) : fullGroupLabel/);
+  assert.match(script, /compact \? resetText\(windowData\.resetAt, now, true\) : resetFull/);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.quota\.is-empty\s*,\s*\.watch\[data-density="strip-mini"\] \.group-metric\.is-empty\s*\{[^}]*display:\s*none;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.service-name\.is-live \.dot\s*\{[^}]*background:\s*var\(--live\)/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.service-name\.is-error \.dot\s*\{[^}]*background:\s*var\(--alert\)/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.quota::after\s*\{[^}]*height:\s*6px;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.group-metric::after\s*\{[^}]*height:\s*6px;/s);
+  assert.doesNotMatch(stylesheet, /\.watch\[data-density="strip-mini"\] \.quota::after\s*\{[^}]*box-shadow:/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\] \.empty-state\s*\{[^}]*display:\s*flex;/s);
+  assert.match(stylesheet, /\.watch\[data-density="strip-mini"\]:not\(\[aria-busy="true"\]\) \.readouts:empty\s*\{[^}]*display:\s*none;/s);
+  assert.match(script, /density === 'strip-mini' \? abbreviateLabel\(metadata\.id, fullLabel\) : fullLabel/);
+  assert.match(script, /density === 'strip-mini' \? '等待快照' : `等待本地快照 \$\{metadata\.bridgeFile\}`/);
+  assert.match(script, /name\.classList\.add\(`is-\$\{state\.kind\}`\)/);
+
+  assert.equal(abbreviateLabel('claude', 'Claude Code'), 'CC');
+  assert.equal(abbreviateLabel('codex', 'Codex'), 'CX');
+  assert.equal(abbreviateLabel('unknown-agent', 'Some Tool'), 'ST');
+  assert.equal(abbreviateLabel('unknown-agent', 'SoloTool'), 'SO');
+  assert.equal(abbreviateGroupLabel('Gemini Models'), 'GM');
+  assert.equal(abbreviateGroupLabel('Claude and GPT models'), 'CG');
+  assert.equal(abbreviateGroupLabel('Fast models'), 'FM');
 });
 
 test('grouped agent cards render individual reset countdowns for each group window', () => {
