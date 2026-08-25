@@ -32,6 +32,7 @@ let settingsCloseTimer = null;
 let resizeTimer = null;
 let lastResizeRequest = '';
 let lastResizeWidth = null;
+let stripMiniStableHeight = null;
 let settingsReturnFocus = null;
 let lastRenderSignature = null;
 let previousCardSignatures = new Map();
@@ -531,6 +532,7 @@ function stripMiniContentWidth(dashboard, readouts, fallbackWidth) {
 function requestDesktopResize(layout) {
   if (!window.desktopHud || typeof window.desktopHud.resize !== 'function') return;
   if (resizeTimer) clearTimeout(resizeTimer);
+  if (layout.density !== 'strip-mini') stripMiniStableHeight = null;
   if (settingsOpen) {
     resizeTimer = null;
     const settingsWidth = isStripDensity(layout.density)
@@ -579,7 +581,11 @@ function requestDesktopResize(layout) {
     const measuredWidth = contentSizedStrip
       ? stripMiniContentWidth(dashboard, readouts, layout.width)
       : layout.width;
-    sendDesktopResize(measuredWidth, Math.max(minimumHeight, measuredHeight));
+    const targetHeight = contentSizedStrip
+      ? stripMiniStableHeight ?? Math.max(minimumHeight, measuredHeight)
+      : Math.max(minimumHeight, measuredHeight);
+    if (contentSizedStrip) stripMiniStableHeight = targetHeight;
+    sendDesktopResize(measuredWidth, targetHeight);
   }, 80);
 }
 

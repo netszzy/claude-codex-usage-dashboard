@@ -357,11 +357,18 @@ test('polling does not replay an estimated height after the target width was req
     assert.deepEqual(resizeCalls, [[480, 48]]);
 
     resizeCalls.length = 0;
-    dashboardHeight = 28;
+    dashboardHeight = 34;
     requestDesktopResize({ width: 480, height: 40, density: 'strip-mini' });
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    assert.deepEqual(resizeCalls, [[480, 40]]);
+    assert.deepEqual(resizeCalls, [[480, 42]]);
+
+    resizeCalls.length = 0;
+    dashboardHeight = 40;
+    requestDesktopResize({ width: 520, height: 40, density: 'strip-mini' });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    assert.deepEqual(resizeCalls, [[520, 42]]);
   } finally {
     if (originalWindow === undefined) delete global.window;
     else global.window = originalWindow;
