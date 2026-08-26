@@ -5,6 +5,7 @@ yarn-error.log*
 pnpm-debug.log*
 
 config.json
+phone-display.json
 .agents/
 .claude/
 .codex/

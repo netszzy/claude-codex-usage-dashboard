@@ -37,6 +37,7 @@ let settingsReturnFocus = null;
 let lastRenderSignature = null;
 let previousCardSignatures = new Map();
 let usageEtag = null;
+let syncedVisibleAgentsSignature = null;
 
 function percentValue(windowData) {
   return windowData && typeof windowData.used === 'number' && Number.isFinite(windowData.used)
@@ -445,6 +446,7 @@ function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(currentSettings));
   } catch {}
+  syncVisibleAgents();
 }
 
 function serverConfigFromUsage(usage) {
@@ -466,8 +468,9 @@ function setSettingsStatus(message, isError = false) {
   node.classList.toggle('is-error', isError);
 }
 
-async function saveServerConfig(patch) {
-  setSettingsStatus('正在保存…');
+async function saveServerConfig(patch, options = {}) {
+  const quiet = options.quiet === true;
+  if (!quiet) setSettingsStatus('正在保存…');
   try {
     const response = await fetch('/api/config', {
       method: 'POST',
@@ -488,12 +491,23 @@ async function saveServerConfig(patch) {
     lastGoodUsage = latestUsage;
     lastRenderSignature = null;
     renderUsage(latestUsage);
-    setSettingsStatus('已保存到本机');
+    if (!quiet) setSettingsStatus('已保存到本机');
     return true;
   } catch (error) {
-    setSettingsStatus(error.message || '配置保存失败', true);
+    if (!quiet) setSettingsStatus(error.message || '配置保存失败', true);
     return false;
   }
+}
+
+function syncVisibleAgents() {
+  if (!currentSettings || !Array.isArray(currentSettings.visibleAgents)) return;
+  const visibleAgents = [...currentSettings.visibleAgents];
+  const signature = JSON.stringify(visibleAgents);
+  if (signature === syncedVisibleAgentsSignature) return;
+  syncedVisibleAgentsSignature = signature;
+  void saveServerConfig({ visibleAgents }, { quiet: true }).then((saved) => {
+    if (!saved && syncedVisibleAgentsSignature === signature) syncedVisibleAgentsSignature = null;
+  });
 }
 
 function settingsWindowHeight(agentCount) {
@@ -610,6 +624,7 @@ function renderUsage(usage, now = Date.now()) {
   const catalogChanged = nextCatalog.map((agent) => agent.id).join('|') !== currentCatalog.map((agent) => agent.id).join('|');
   currentCatalog = nextCatalog;
   if (!currentSettings || catalogChanged) currentSettings = readSavedSettings(currentCatalog);
+  syncVisibleAgents();
 
   const dashboard = document.getElementById('dashboard');
   dashboard.setAttribute('aria-busy', 'false');

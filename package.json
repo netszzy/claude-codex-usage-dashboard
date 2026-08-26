@@ -14,7 +14,7 @@
     "setup:claude:fanout": "node setup-statusline.js --fanout",
     "test": "node --test",
     "lint": "eslint .",
-    "check": "node --check server.js && node --check kimi-usage-snapshot.js && node --check grok-usage-snapshot.js && node --check dashboard.js && node --check desktop/main.js && node --check desktop/menu-template.js && node --check desktop/preload.js && node --check desktop/window-bounds.js && node --check setup-statusline.js && node --check statusline-usage.js && node --check statusline-both.js && node --check scripts/ensure-electron.js && node scripts/ensure-electron.js --check && npm run lint && npm test",
+    "check": "node --check server.js && node --check kimi-usage-snapshot.js && node --check grok-usage-snapshot.js && node --check dashboard.js && node --check phone-display.js && node --check lib/phone-display.js && node --check desktop/main.js && node --check desktop/menu-template.js && node --check desktop/preload.js && node --check desktop/window-bounds.js && node --check setup-statusline.js && node --check statusline-usage.js && node --check statusline-both.js && node --check scripts/ensure-electron.js && node scripts/ensure-electron.js --check && npm run lint && npm test",
     "pack:win": "electron-builder --win portable"
   },
   "keywords": [
@@ -61,6 +61,19 @@
       "!**/*.db*",
       "!**/*.log",
       "!**/*.tmp"
+    ],
+    "asarUnpack": [
+      "server.js",
+      "lib/**/*",
+      "dashboard.html",
+      "dashboard.css",
+      "dashboard.js",
+      "phone-display.html",
+      "phone-display.css",
+      "phone-display.js",
+      "phone-pair.css",
+      "kimi-usage-snapshot.js",
+      "grok-usage-snapshot.js"
     ],
     "win": {
       "target": [

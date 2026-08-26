@@ -8,11 +8,12 @@ $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $runner = Join-Path $root 'run-desktop-hidden.vbs'
 $legacyRunner = Join-Path $root 'run-hidden.vbs'
+$fullRunner = Join-Path $root 'run-dashboard-complete.vbs'
 $electron = Join-Path $root 'node_modules\electron\dist\electron.exe'
 $wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
 $shortcutName = 'AIUsageDashboardDesktop.lnk'
 $legacyNames = @('AIUsageDashboard.lnk')
-$ownedRunners = @($runner, $legacyRunner)
+$ownedRunners = @($runner, $legacyRunner, $fullRunner)
 $ws = New-Object -ComObject WScript.Shell
 
 $locations = @(
@@ -70,7 +71,7 @@ function Remove-OwnedShortcut {
 }
 
 function New-DashboardShortcut {
-  param([string]$Directory)
+  param([string]$Directory, [string]$Runner)
 
   if (-not (Test-Path -LiteralPath $Directory)) {
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null
@@ -79,7 +80,7 @@ function New-DashboardShortcut {
   $path = Join-Path $Directory $shortcutName
   $shortcut = $ws.CreateShortcut($path)
   $shortcut.TargetPath = $wscript
-  $shortcut.Arguments = '"' + $runner + '"'
+  $shortcut.Arguments = '"' + $Runner + '"'
   $shortcut.WorkingDirectory = $root
   $shortcut.IconLocation = $electron + ',0'
   $shortcut.Save()
@@ -106,12 +107,16 @@ if (-not (Test-Path -LiteralPath $electron)) {
 if (-not (Test-Path -LiteralPath $runner)) {
   throw "Missing launcher: $runner"
 }
+if (-not (Test-Path -LiteralPath $fullRunner)) {
+  throw "Missing complete launcher: $fullRunner"
+}
 
 foreach ($location in $locations) {
   Assert-ShortcutSlotAvailable -Directory $location.Path -Name $shortcutName
 }
 foreach ($location in $locations) {
-  New-DashboardShortcut -Directory $location.Path
+  $targetRunner = if ($location.Name -eq 'desktop') { $fullRunner } else { $runner }
+  New-DashboardShortcut -Directory $location.Path -Runner $targetRunner
 }
 foreach ($location in $locations) {
   foreach ($legacyName in $legacyNames) {
@@ -120,5 +125,5 @@ foreach ($location in $locations) {
 }
 
 if (-not $NoStart) {
-  Start-Process -FilePath $wscript -ArgumentList ('"' + $runner + '"') -WindowStyle Hidden
+  Start-Process -FilePath $wscript -ArgumentList ('"' + $fullRunner + '"') -WindowStyle Hidden
 }

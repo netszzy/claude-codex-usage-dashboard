@@ -2,9 +2,13 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
+if exist "%~dp0release\win-unpacked\AI Usage Dashboard.exe" (
+  start "" "%~dp0release\win-unpacked\AI Usage Dashboard.exe"
+  exit /b 0
+)
+
 for %%F in ("%~dp0release\AI-Usage-Dashboard-*-portable.exe") do (
   if exist "%%~fF" (
-    echo Starting packaged AI Usage Dashboard...
     start "" "%%~fF"
     exit /b 0
   )

@@ -11,6 +11,7 @@ const { PassThrough } = require('stream');
 const {
   antigravityLineTimestamp,
   buildAgentCatalog,
+  createPhoneUsageProvider,
   normalizeAgentSnapshot,
   normalizeCodexAppServerRateLimits,
   normalizeCodexRateLimits,
@@ -18,6 +19,25 @@ const {
   readExternalAgentSnapshots,
   readLatestCodexSnapshot,
 } = require('../server');
+
+test('phone display reads the desktop API response instead of sampling collectors independently', async () => {
+  let requestedUrl = null;
+  const usage = { agents: [{ id: 'codex', fetchedAt: 123 }] };
+  const provider = createPhoneUsageProvider({
+    sourceHost: '127.0.0.1',
+    sourcePort: 9876,
+    fetchImpl: async (url, options) => {
+      requestedUrl = { url, options };
+      return { ok: true, json: async () => usage };
+    },
+  });
+
+  assert.deepEqual(await provider(), usage);
+  assert.deepEqual(requestedUrl, {
+    url: 'http://127.0.0.1:9876/api/usage',
+    options: { cache: 'no-store' },
+  });
+});
 
 function fakeCodexAppServerSpawn(onSpawn) {
   const child = new EventEmitter();

@@ -10,6 +10,7 @@ test('tray menu template reflects window state and keeps action handlers', () =>
     toggle() {},
     reload() {},
     setAlwaysOnTop() {},
+    showPhoneDisplay() {},
     quit() {},
   };
 
@@ -24,4 +25,21 @@ test('tray menu template reflects window state and keeps action handlers', () =>
   const hidden = buildTrayMenuTemplate({ visible: false, alwaysOnTop: false }, actions);
   assert.equal(hidden[0].label, '显示浮窗');
   assert.equal(hidden[2].checked, false);
+
+  const withPhone = buildTrayMenuTemplate({
+    visible: true,
+    alwaysOnTop: true,
+    phoneDisplay: true,
+    phoneDisplayStatus: 'ready',
+  }, actions);
+  assert.equal(withPhone[3].label, '手机外接屏（已就绪）…');
+  assert.equal(withPhone[3].click, actions.showPhoneDisplay);
+
+  const unavailable = buildTrayMenuTemplate({
+    visible: true,
+    alwaysOnTop: true,
+    phoneDisplay: true,
+    phoneDisplayStatus: 'error',
+  }, actions);
+  assert.equal(unavailable[3].label, '手机外接屏（不可用）…');
 });

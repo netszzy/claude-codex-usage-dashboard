@@ -18,6 +18,7 @@
 - Codex 默认每 60 秒最多通过本机 app-server 读取一次账户配额，失败时回退到会话文件，并从文件尾部反向分块读取最新 rate_limits。
 - Antigravity 在解析到有效配额前不会覆盖最后一份有效缓存。
 - 提供无边框、透明、始终置顶的 Electron 悬浮窗和托盘恢复入口。
+- 可选的 iPhone 外接屏模式：单独的只读局域网入口、首次配对码、横屏自适应进度显示，不放开原有桌面 API。
 - 开机自启安装器只处理本项目拥有的快捷方式。
 - 使用严格 CSP、loopback Host 校验、沙箱 renderer 和受限 preload。
 - 使用 Node.js 内置测试框架提供回归测试。
@@ -62,6 +63,14 @@ npm start
 
 Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现有窗口，不会创建第二套进程。
 
+## iPhone 外接屏
+
+旧 iPhone 可以作为常亮横屏，效果比把它当 USB 副屏更稳定：数据仍走同一 Wi-Fi，数据线只负责供电。
+
+双击 `start-dashboard-phone.bat` 启动，首次在 Windows 防火墙中只允许“专用网络”。然后右键托盘图标，选择“手机外接屏…”，在 iPhone Safari 打开同 Wi-Fi 网段的地址并输入配对码。成功后用 Safari 的“添加到主屏幕”固定入口。
+
+手机端只读，并严格同步桌面当前勾选的 Agent 与顺序；原有 `127.0.0.1` 服务、桌面 HUD 与 `/api/config` 均不对手机开放。托盘会显示“启动中”“已就绪”或“不可用”；多网卡或 RayLink/GameViewer 虚拟网卡环境会显示多个候选地址，请选择与 iPhone 同网段的那个。完整设置与安全边界见 [docs/PHONE_DISPLAY.md](docs/PHONE_DISPLAY.md)。
+
 ## 配置看板
 
 点击悬浮窗右上角的“配置”：
@@ -70,7 +79,7 @@ Electron 会启动本地服务并打开悬浮窗。重复启动只会唤回现�
 2. 选择“自适应”“紧凑”“舒展”卡片样式，或选择“横向条”以单行进度条方式展示所有 Agent。“极简条”再收一档：Agent 名改用缩写（Claude Code→CC、Codex→CX），Antigravity 的 Gemini / Claude-GPT 系列标成 GM / CG，LIVE/STALE/OFFLINE 改由色点表示，重置倒计时改成 `6时16分` 这种短写法，进度条加粗，窗口高度约 40px。
 3. 调整 50%～95% 的告警阈值，以及 Kimi Code、Grok 的自动刷新开关。
 
-显示 Agent 与布局样式写入 Electron 页面的本地存储；告警阈值与桥接开关写入 `%USERPROFILE%\.claude-codex-usage-dashboard\dashboard-config.json`。这两类设置都不修改 Agent 配置或凭据。`ALERT_PERCENT`、`KIMI_USAGE_BRIDGE`、`GROK_USAGE_BRIDGE` 环境变量仍可覆盖本机保存值。
+显示 Agent 与布局样式写入 Electron 页面的本地存储；同时会把已选 Agent 的顺序同步到 `%USERPROFILE%\.claude-codex-usage-dashboard\dashboard-config.json`，供 iPhone 只读屏复刻。告警阈值与桥接开关也写入该文件。这些设置都不修改 Agent 配置或凭据。`ALERT_PERCENT`、`KIMI_USAGE_BRIDGE`、`GROK_USAGE_BRIDGE` 环境变量仍可覆盖本机保存值。
 
 “恢复默认”会恢复 Claude Code、Codex、Antigravity 三个自动采集项、自适应样式、85% 告警阈值，以及两个桥接均自动刷新。
 
@@ -198,6 +207,10 @@ fanout 模式会把原命令保存到忽略提交的 config.json，然后让 sta
 | DASHBOARD_PORT | 8787 | Electron 使用的服务端口 |
 | DASHBOARD_HOST | 127.0.0.1 | Electron 使用的服务地址，仅允许 loopback |
 | DASHBOARD_CONFIG_PATH | ~/.claude-codex-usage-dashboard/dashboard-config.json | 看板自有配置文件路径 |
+| PHONE_DISPLAY | off | `on` 时启动受配对保护的局域网 iPhone 只读显示入口；`start-dashboard-phone.bat` 会自动设为 on |
+| PHONE_DISPLAY_PORT | 8788 | iPhone 只读入口端口，范围 1～65535 |
+| PHONE_DISPLAY_HOST | 0.0.0.0 | iPhone 入口监听地址，仅允许 `0.0.0.0` 或 `127.0.0.1` |
+| PHONE_DISPLAY_CONFIG_PATH | ~/.claude-codex-usage-dashboard/phone-display.json | iPhone 配对码和会话令牌的私有本机文件 |
 | ALERT_PERCENT | 85 | 进入红色告警状态的使用率 |
 | CODEX_LOOKBACK_DAYS | 14 | 查找 Codex 会话文件的天数 |
 | CLAUDE_STALE_MINUTES | 10 | Claude 数据过期阈值 |
@@ -255,7 +268,7 @@ npm start
 
 - GET /healthz：轻量健康检查，不读取日志。
 - GET /api/usage：返回标准化的 `agents` 列表、`config.agents` 目录、`config.alertPercent` 和 `config.bridges`；同时保留原有 `claude`、`codex`、`antigravity` 字段兼容旧客户端。响应带 ETag，客户端可通过 `If-None-Match` 获得 304。
-- POST /api/config：仅接受本机 Origin 的 JSON 请求；白名单字段为 `alertPercent` 与 `bridges.kimi`、`bridges.grok`。
+- POST /api/config：仅接受本机 Origin 的 JSON 请求；白名单字段为 `alertPercent`、`bridges.kimi`、`bridges.grok` 与 `visibleAgents`。
 - GET /?mode=desktop：HUD 页面。
 
 其他 Host、方法和路径会返回 403、405 或 404。

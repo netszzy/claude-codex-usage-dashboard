@@ -1,10 +1,10 @@
-Dim fso, sh, folder, exePath, scriptPath
+Dim fso, sh, folder, cmdPath, starterPath, command
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set sh = CreateObject("WScript.Shell")
 folder = fso.GetParentFolderName(WScript.ScriptFullName)
-scriptPath = fso.BuildPath(folder, "desktop\main.js")
-exePath = fso.BuildPath(folder, "node_modules\electron\dist\electron.exe")
+cmdPath = sh.ExpandEnvironmentStrings("%ComSpec%")
+starterPath = fso.BuildPath(folder, "start-dashboard-desktop.bat")
 
 sh.CurrentDirectory = folder
-sh.Environment("PROCESS")("DASHBOARD_HOST") = "127.0.0.1"
-sh.Run """" & exePath & """" & " """ & scriptPath & """", 0, False
+command = Chr(34) & cmdPath & Chr(34) & " /d /c " & Chr(34) & Chr(34) & starterPath & Chr(34) & Chr(34)
+sh.Run command, 0, False

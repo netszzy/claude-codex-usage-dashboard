@@ -19,9 +19,13 @@ API 只返回配额百分比、重置时间、数据新鲜度、错误状态和�
 - server.js 默认监听 127.0.0.1。
 - HOST 和 DASHBOARD_HOST 仅接受 127.0.0.1、localhost 或 ::1。
 - HTTP 层拒绝非 loopback Host header，降低 DNS rebinding 风险。
-- `/api/config` 只接受 loopback Origin，且仅能修改告警阈值和 Kimi/Grok 桥接开关；配置保存在本项目自有目录，不写入第三方 Agent 目录。
+- `/api/config` 只接受 loopback Origin，且仅能修改告警阈值、Kimi/Grok 桥接开关和已选 Agent 的显示顺序；配置保存在本项目自有目录，不写入第三方 Agent 目录。
 - 页面使用严格 CSP，只允许加载同源 CSS/JavaScript 并访问同源 API。
 - 页面不加载 Google Fonts 或其他远程资源。
+- iPhone 外接屏默认关闭；只有显式设置 `PHONE_DISPLAY=on`（或使用 `start-dashboard-phone.bat`）才会启动独立的 8788 服务。
+- iPhone 服务仅接受 RFC1918 私网或 loopback 客户端，首次连接需要约 60 bit 随机配对码，连续失败五次会限流十分钟。配对后的只读 Cookie 使用 `HttpOnly` 和 `SameSite=Strict`。
+- iPhone 服务使用本地 HTTP，设计目标是受信任的家庭私网；不要在公共、访客或不可信 Wi-Fi 上开启。
+- iPhone 服务只提供单独的额度展示资源和只读 usage API，不提供 `/api/config`、桌面页面或其他 loopback 服务路由。
 - Codex 配额刷新只启动本机 Codex CLI，并由它访问 OpenAI 的账户配额服务；面板不接触认证 token。
 - Antigravity gRPC 请求只访问 https://127.0.0.1:<port>。
 
@@ -57,7 +61,7 @@ setup-statusline.js 会：
 
 ## 不要提交
 
-不要提交 `.agents/`、`.claude/`、`.codex/`、`.grok/`、`.kimi-code/`、Claude/Codex 本地缓存、Claude 设置、config.json、`*.db*`、截图中的私有信息、token、API key、密码或其他凭据。
+不要提交 `.agents/`、`.claude/`、`.codex/`、`.grok/`、`.kimi-code/`、Claude/Codex 本地缓存、Claude 设置、config.json、`phone-display.json`、`*.db*`、截图中的私有信息、token、API key、密码或其他凭据。
 
 ## 报告问题
 

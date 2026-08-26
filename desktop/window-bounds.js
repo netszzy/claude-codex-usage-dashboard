@@ -24,4 +24,15 @@ function resizeBoundsFromBottomRight(current, size, area) {
   }, area);
 }
 
-module.exports = { clampBoundsToArea, resizeBoundsFromBottomRight };
+function resizeBoundsPreservingPosition(current, size, area) {
+  const x = Math.min(Math.max(area.x, current.x), area.x + area.width - 1);
+  const y = Math.min(Math.max(area.y, current.y), area.y + area.height - 1);
+  return {
+    x,
+    y,
+    width: Math.min(size.width, area.x + area.width - x),
+    height: Math.min(size.height, area.y + area.height - y),
+  };
+}
+
+module.exports = { clampBoundsToArea, resizeBoundsFromBottomRight, resizeBoundsPreservingPosition };

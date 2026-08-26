@@ -42,16 +42,18 @@ test('usage responses support ETag revalidation and local config updates reject 
     const updated = await fetch(`${base}/api/config`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Origin: base },
-      body: JSON.stringify({ alertPercent: 70, bridges: { kimi: false } }),
+      body: JSON.stringify({ alertPercent: 70, bridges: { kimi: false }, visibleAgents: ['codex', 'claude'] }),
     });
     assert.equal(updated.status, 200);
     assert.deepEqual((await updated.json()).config, {
       alertPercent: 70,
       bridges: { kimi: false, grok: true },
+      visibleAgents: ['codex', 'claude'],
     });
     assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), {
       alertPercent: 70,
       bridges: { kimi: false, grok: true },
+      visibleAgents: ['codex', 'claude'],
     });
 
     const rejected = await fetch(`${base}/api/config`, {
@@ -60,6 +62,13 @@ test('usage responses support ETag revalidation and local config updates reject 
       body: JSON.stringify({ secret: true }),
     });
     assert.equal(rejected.status, 400);
+
+    const invalidVisibleAgents = await fetch(`${base}/api/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: base },
+      body: JSON.stringify({ visibleAgents: ['claude', 'claude'] }),
+    });
+    assert.equal(invalidVisibleAgents.status, 400);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -77,9 +86,11 @@ test('environment values override persisted dashboard controls without discardin
   assert.deepEqual(configStore.update({ alertPercent: 70, bridges: { kimi: true, grok: false } }), {
     alertPercent: 91,
     bridges: { kimi: false, grok: false },
+    visibleAgents: null,
   });
   assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), {
     alertPercent: 70,
     bridges: { kimi: true, grok: false },
+    visibleAgents: null,
   });
 });

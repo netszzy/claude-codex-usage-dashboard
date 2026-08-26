@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111114">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Usage Watch 手机外接屏">
+  <title>Usage Watch</title>
+  <link rel="stylesheet" href="./phone-display.css">
+  <script src="./phone-display.js" defer></script>
+</head>
+<body>
+  <main class="phone-dashboard" aria-label="Usage Watch 手机外接屏">
+    <header class="phone-head">
+      <div class="phone-title">
+        <span class="phone-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <strong>Usage Watch</strong>
+      </div>
+      <span id="phone_state" class="phone-state" role="status" aria-live="polite">连接中</span>
+    </header>
+    <section id="phone_readouts" class="phone-readouts" aria-label="Agent 额度"></section>
+    <p id="phone_empty" class="phone-empty" hidden>尚未找到可展示的 Agent。</p>
+    <footer class="phone-foot">
+      <span id="phone_updated">正在读取本机额度</span>
+      <span>外接屏 · 实时更新</span>
+    </footer>
+  </main>
+</body>
+</html>

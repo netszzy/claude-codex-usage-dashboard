@@ -1,9 +1,10 @@
-const { app, BrowserWindow, Menu, MenuItem, Tray, ipcMain, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, Menu, MenuItem, Tray, clipboard, dialog, ipcMain, nativeImage, screen, utilityProcess } = require('electron');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { clampBoundsToArea, resizeBoundsFromBottomRight } = require('./window-bounds');
+const { clampBoundsToArea, resizeBoundsFromBottomRight, resizeBoundsPreservingPosition } = require('./window-bounds');
 const { buildTrayMenuTemplate } = require('./menu-template');
+const { hasPhoneDisplayLaunchArgument, phoneDisplaySettings, phoneDisplayUrls } = require('../lib/phone-display');
 
 app.setName('Usage Watch');
 
@@ -22,6 +23,14 @@ let WINDOW_STATE_FILE = null;
 const URL_HOST = HOST.includes(':') ? `[${HOST}]` : HOST;
 const DASHBOARD_URL = `http://${URL_HOST}:${PORT}`;
 const HEALTH_URL = `${DASHBOARD_URL}/healthz`;
+const PHONE_DISPLAY = phoneDisplaySettings({
+  env: hasPhoneDisplayLaunchArgument(process.argv)
+    ? { ...process.env, PHONE_DISPLAY: 'on' }
+    : process.env,
+});
+const PHONE_DISPLAY_URL = PHONE_DISPLAY.enabled
+  ? `http://127.0.0.1:${PHONE_DISPLAY.port}/phone/`
+  : null;
 const ERROR_PAGE = `
 <!doctype html>
 <html lang="en">
@@ -52,12 +61,17 @@ const ERROR_PAGE = `
 
 let serverProcess = null;
 let serverOwned = false;
+let phoneDisplayProcess = null;
 let mainWindow = null;
 let isAlwaysOnTop = true;
+let positionLocked = false;
 let dragState = null;
+let pendingHudSize = null;
 let tray = null;
 let isQuitting = false;
 let lastServerError = '';
+let phoneDisplayStatus = PHONE_DISPLAY.enabled ? 'starting' : 'off';
+let phoneDisplayError = '';
 
 const DEFAULT_WIDTH = 380;
 const DEFAULT_HEIGHT = 224;
@@ -65,6 +79,9 @@ const MIN_HUD_WIDTH = 240;
 const MAX_HUD_WIDTH = 32768;
 const MIN_HUD_HEIGHT = 40;
 const MAX_HUD_HEIGHT = 640;
+const PHONE_DISPLAY_COMPANION_PORT = PHONE_DISPLAY.enabled
+  ? (PORT === 8789 || PHONE_DISPLAY.port === 8789 ? 8790 : 8789)
+  : null;
 
 // Fractional display scaling can make window.getBounds() report a width/height
 // that drifts from what was actually requested. Track the intended size ourselves
@@ -101,6 +118,51 @@ async function waitDashboardReady(timeoutMs = 8000) {
     if (await isDashboardReady()) return true;
     await sleep(250);
   }
+  return false;
+}
+
+function phoneDisplayErrorMessage(error) {
+  const message = String(error || '');
+  if (/EADDRINUSE/i.test(message)) return `端口 ${PHONE_DISPLAY.port} 已被其他程序占用。`;
+  if (/EACCES/i.test(message)) return `没有权限使用端口 ${PHONE_DISPLAY.port}。`;
+  return `手机服务未能在端口 ${PHONE_DISPLAY.port} 启动。请检查防火墙或重启看板。`;
+}
+
+function setPhoneDisplayStatus(status, error = '') {
+  if (!PHONE_DISPLAY.enabled) return;
+  phoneDisplayStatus = status;
+  phoneDisplayError = error;
+  rebuildTrayMenu();
+}
+
+async function isPhoneDisplayReady() {
+  if (!PHONE_DISPLAY_URL) return false;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1200);
+  try {
+    const response = await fetch(PHONE_DISPLAY_URL, { cache: 'no-store', signal: controller.signal });
+    return response.ok && response.headers.get('x-usage-phone-display') === '1';
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function ensurePhoneDisplayReady(timeoutMs = 6000, retry = false) {
+  if (!PHONE_DISPLAY.enabled) return true;
+  const previousError = phoneDisplayError;
+  if (retry || phoneDisplayStatus !== 'error') setPhoneDisplayStatus('starting');
+  const endAt = Date.now() + timeoutMs;
+  while (Date.now() < endAt) {
+    if (await isPhoneDisplayReady()) {
+      setPhoneDisplayStatus('ready');
+      return true;
+    }
+    if (phoneDisplayStatus === 'error') return false;
+    await sleep(250);
+  }
+  setPhoneDisplayStatus('error', phoneDisplayError || previousError || phoneDisplayErrorMessage());
   return false;
 }
 
@@ -155,6 +217,7 @@ function saveWindowState(bounds) {
         width: bounds.width,
         height: bounds.height,
         alwaysOnTop: isAlwaysOnTop,
+        positionLocked,
       }, null, 2),
       'utf8',
     );
@@ -165,7 +228,7 @@ function saveWindowState(bounds) {
 
 function clampToScreen(bounds) {
   const display = screen.getDisplayMatching(bounds) || screen.getPrimaryDisplay();
-  return clampBoundsToArea(bounds, display.workArea);
+  return clampBoundsToArea(bounds, positionLocked ? display.bounds : display.workArea);
 }
 
 function keepWindowInWorkArea(window) {
@@ -203,11 +266,12 @@ function buildInitialWindowBounds() {
   const bounds = saved
     ? (() => {
       isAlwaysOnTop = saved.alwaysOnTop !== false;
+      positionLocked = saved.positionLocked !== false;
       return clampToScreen({
         x: saved.x,
         y: saved.y,
-        width: DEFAULT_WIDTH,
-        height: DEFAULT_HEIGHT,
+        width: Math.min(Math.max(MIN_HUD_WIDTH, saved.width), MAX_HUD_WIDTH),
+        height: Math.min(Math.max(MIN_HUD_HEIGHT, saved.height), MAX_HUD_HEIGHT),
       });
     })()
     : clampBoundsToArea({
@@ -217,6 +281,9 @@ function buildInitialWindowBounds() {
       height: DEFAULT_HEIGHT,
     }, area);
   hudSize = { width: bounds.width, height: bounds.height };
+  if (saved && saved.positionLocked !== positionLocked) {
+    saveWindowState(bounds);
+  }
   return bounds;
 }
 
@@ -224,25 +291,36 @@ async function detectServerRunning() {
   return isDashboardReady();
 }
 
-function spawnServer() {
-  const serverPath = path.join(__dirname, '..', 'server.js');
-  const child = spawn(process.execPath, [serverPath], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env,
-      PORT: String(PORT),
-      HOST,
-      NODE_NO_WARNINGS: '1',
-      ELECTRON_RUN_AS_NODE: '1',
-    },
+function spawnServer(environmentOverrides = {}, serviceName = 'Usage Watch local service') {
+  const serverRoot = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked')
+    : path.join(__dirname, '..');
+  const serverPath = path.join(serverRoot, 'server.js');
+  const serverEnvironment = {
+    ...process.env,
+    PORT: String(PORT),
+    HOST,
+    NODE_NO_WARNINGS: '1',
+    ...environmentOverrides,
+  };
+  if (!app.isPackaged) serverEnvironment.ELECTRON_RUN_AS_NODE = '1';
+  const options = {
+    cwd: serverRoot,
+    env: serverEnvironment,
     stdio: ['ignore', 'ignore', 'pipe'],
-  });
+  };
+  const child = app.isPackaged
+    ? utilityProcess.fork(serverPath, [], { ...options, serviceName })
+    : spawn(process.execPath, [serverPath], options);
 
   if (child.stderr) {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk) => {
       lastServerError = String(chunk).trim().slice(-1000);
       if (lastServerError) console.error('[dashboard-desktop] server:', lastServerError);
+      if (PHONE_DISPLAY.enabled && /\[phone-display-server\]/.test(lastServerError)) {
+        setPhoneDisplayStatus('error', phoneDisplayErrorMessage(lastServerError));
+      }
     });
   }
 
@@ -252,11 +330,18 @@ function spawnServer() {
 
   child.on('exit', (code, signal) => {
     console.log('[dashboard-desktop] server exited:', code, signal);
-    if (serverProcess === child) {
+    const wasPrimaryServer = serverProcess === child;
+    const wasPhoneDisplayCompanion = phoneDisplayProcess === child;
+    if (wasPrimaryServer) {
       serverProcess = null;
       serverOwned = false;
+    } else if (wasPhoneDisplayCompanion) {
+      phoneDisplayProcess = null;
     }
-    if (mainWindow && mainWindow.webContents && mainWindow.webContents.isLoadingMainFrame()) {
+    if (PHONE_DISPLAY.enabled && !isQuitting && (wasPrimaryServer || wasPhoneDisplayCompanion)) {
+      setPhoneDisplayStatus('error', phoneDisplayError || '手机服务已停止。请重新启动手机外接屏。');
+    }
+    if (wasPrimaryServer && mainWindow && mainWindow.webContents && mainWindow.webContents.isLoadingMainFrame()) {
       mainWindow.webContents.loadURL(buildErrorPageUrl());
     }
   });
@@ -264,9 +349,25 @@ function spawnServer() {
   return child;
 }
 
+async function ensurePhoneDisplayServer() {
+  if (!PHONE_DISPLAY.enabled || await isPhoneDisplayReady()) return;
+  if (!phoneDisplayProcess) {
+    console.log('[dashboard-desktop] starting phone display companion...');
+    phoneDisplayProcess = spawnServer({
+      PORT: String(PHONE_DISPLAY_COMPANION_PORT),
+      PHONE_DISPLAY: 'on',
+      PHONE_DISPLAY_HOST: PHONE_DISPLAY.host,
+      PHONE_DISPLAY_PORT: String(PHONE_DISPLAY.port),
+      PHONE_DISPLAY_SOURCE_PORT: String(PORT),
+    }, 'Usage Watch phone display service');
+  }
+}
+
 async function ensureServer() {
   if (await detectServerRunning()) {
     serverOwned = false;
+    await ensurePhoneDisplayServer();
+    await ensurePhoneDisplayReady();
     return true;
   }
 
@@ -279,6 +380,10 @@ async function ensureServer() {
   const ok = await waitDashboardReady(12000);
   if (!ok) {
     console.error('[dashboard-desktop] server startup timeout');
+    if (PHONE_DISPLAY.enabled) setPhoneDisplayStatus('error', '桌面服务未能启动，手机服务不可用。');
+  } else {
+    await ensurePhoneDisplayServer();
+    await ensurePhoneDisplayReady();
   }
   return ok;
 }
@@ -324,12 +429,16 @@ function bindDragIpc() {
     const nextX = Number(point.x);
     const nextY = Number(point.y);
     if (!Number.isFinite(nextX) || !Number.isFinite(nextY)) return;
-    dragState.window.setBounds({
+    const requested = {
       x: Math.round(dragState.originX + nextX - dragState.startX),
       y: Math.round(dragState.originY + nextY - dragState.startY),
       width: hudSize.width,
       height: hudSize.height,
-    });
+    };
+    const display = screen.getDisplayNearestPoint({ x: requested.x, y: requested.y })
+      || screen.getDisplayMatching(requested)
+      || screen.getPrimaryDisplay();
+    dragState.window.setBounds(clampBoundsToArea(requested, display.bounds));
   });
 
   ipcMain.on('hud-drag-end', (event) => {
@@ -337,31 +446,24 @@ function bindDragIpc() {
     if (dragState && dragState.window && !dragState.window.isDestroyed()) {
       const raw = dragState.window.getBounds();
       const bounds = { ...raw, width: hudSize.width, height: hudSize.height };
+      positionLocked = true;
       saveWindowState(bounds);
+      if (pendingHudSize) {
+        const size = pendingHudSize;
+        pendingHudSize = null;
+        resizeHudWindow(dragState.window, size);
+      }
     }
     dragState = null;
   });
 
   ipcMain.on('hud-resize', (event, size) => {
     if (!mainWindow || event.sender !== mainWindow.webContents || mainWindow.isDestroyed() || !size) return;
-    const width = Math.round(Number(size.width));
-    const height = Math.round(Number(size.height));
-    if (!Number.isFinite(width) || !Number.isFinite(height)) return;
-    if (width < MIN_HUD_WIDTH || width > MAX_HUD_WIDTH || height < MIN_HUD_HEIGHT || height > MAX_HUD_HEIGHT) return;
-    const current = { ...mainWindow.getBounds(), width: hudSize.width, height: hudSize.height };
-    const display = screen.getDisplayMatching(current) || screen.getPrimaryDisplay();
-    const bounds = resizeBoundsFromBottomRight(current, { width, height }, display.workArea);
-    if (
-      current.x === bounds.x
-      && current.y === bounds.y
-      && current.width === bounds.width
-      && current.height === bounds.height
-    ) {
+    if (dragState) {
+      pendingHudSize = size;
       return;
     }
-    hudSize = { width: bounds.width, height: bounds.height };
-    mainWindow.setBounds(bounds);
-    saveWindowState(bounds);
+    resizeHudWindow(mainWindow, size);
   });
 
   ipcMain.on('hud-retry', async (event) => {
@@ -372,6 +474,31 @@ function bindDragIpc() {
       lastServerError = error.message;
     });
   });
+}
+
+function resizeHudWindow(window, size) {
+  if (!window || window.isDestroyed() || !size) return;
+  const width = Math.round(Number(size.width));
+  const height = Math.round(Number(size.height));
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return;
+  if (width < MIN_HUD_WIDTH || width > MAX_HUD_WIDTH || height < MIN_HUD_HEIGHT || height > MAX_HUD_HEIGHT) return;
+  const current = { ...window.getBounds(), width: hudSize.width, height: hudSize.height };
+  const display = screen.getDisplayMatching(current) || screen.getPrimaryDisplay();
+  const area = positionLocked ? display.bounds : display.workArea;
+  const bounds = positionLocked
+    ? resizeBoundsPreservingPosition(current, { width, height }, area)
+    : resizeBoundsFromBottomRight(current, { width, height }, area);
+  if (
+    current.x === bounds.x
+    && current.y === bounds.y
+    && current.width === bounds.width
+    && current.height === bounds.height
+  ) {
+    return;
+  }
+  hudSize = { width: bounds.width, height: bounds.height };
+  window.setBounds(bounds);
+  saveWindowState(bounds);
 }
 
 function setTopMost(window) {
@@ -418,12 +545,58 @@ function toggleWindow() {
   }
 }
 
+function phoneDisplayDetail() {
+  const urls = PHONE_DISPLAY.host === '127.0.0.1'
+    ? [`http://127.0.0.1:${PHONE_DISPLAY.port}/phone/`]
+    : phoneDisplayUrls(PHONE_DISPLAY.port);
+  const addressList = urls.length
+    ? urls.map((url) => `• ${url}`).join('\n')
+    : `• http://<本机局域网 IP>:${PHONE_DISPLAY.port}/phone/`;
+  return {
+    urls,
+    text: [
+      phoneDisplayStatus === 'ready'
+        ? '本机手机服务已就绪。'
+        : `当前状态：${phoneDisplayError || '正在检查手机服务。'}`,
+      '',
+      '手机和电脑连接同一 Wi-Fi 后，在 Safari 打开以下任一地址：',
+      addressList,
+      '',
+      `配对码：${PHONE_DISPLAY.access.pairingCode}`,
+      '',
+      '首次配对成功后，可在 iPhone Safari 的分享菜单中“添加到主屏幕”。',
+      '如果这台电脑有多个虚拟网卡，请选择与手机同网段的地址。',
+    ].join('\n'),
+  };
+}
+
+async function showPhoneDisplayInfo() {
+  if (!PHONE_DISPLAY.enabled) return;
+  const info = phoneDisplayDetail();
+  const result = await dialog.showMessageBox({
+    type: phoneDisplayStatus === 'error' ? 'error' : 'info',
+    title: '手机外接屏',
+    message: phoneDisplayStatus === 'ready' ? '手机外接屏已就绪' : '手机外接屏尚未就绪',
+    detail: info.text,
+    buttons: phoneDisplayStatus === 'ready' ? ['复制连接信息', '关闭'] : ['重新检测', '关闭'],
+    defaultId: 1,
+  });
+  if (phoneDisplayStatus === 'ready' && result.response === 0 && info.urls[0]) {
+    clipboard.writeText(`${info.urls[0]}\n配对码：${PHONE_DISPLAY.access.pairingCode}`);
+  }
+  if (phoneDisplayStatus !== 'ready' && result.response === 0) {
+    await ensurePhoneDisplayReady(6000, true);
+  }
+}
+
 function rebuildTrayMenu() {
   if (!tray) return;
   tray.setContextMenu(Menu.buildFromTemplate(buildTrayMenuTemplate(
     {
       visible: Boolean(mainWindow && mainWindow.isVisible()),
       alwaysOnTop: isAlwaysOnTop,
+      phoneDisplay: PHONE_DISPLAY.enabled,
+      phoneDisplayStatus,
     },
     {
       toggle: toggleWindow,
@@ -434,6 +607,7 @@ function rebuildTrayMenu() {
         }
       },
       setAlwaysOnTop: (menuItem) => applyTopMost(mainWindow, menuItem.checked),
+      showPhoneDisplay: showPhoneDisplayInfo,
       quit: () => app.quit(),
     },
   )));
@@ -560,7 +734,7 @@ async function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      backgroundThrottling: true,
+      backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.js'),
     },
     title: 'Claude / Codex Usage Dashboard',
@@ -629,6 +803,27 @@ function stopServer() {
     }
     serverProcess = null;
   }
+  if (phoneDisplayProcess && !phoneDisplayProcess.killed) {
+    try {
+      phoneDisplayProcess.kill();
+    } catch (error) {
+      console.warn('[dashboard-desktop] stop phone display service failed:', error.message);
+    }
+    phoneDisplayProcess = null;
+  }
+}
+
+function relaunchWithPhoneDisplay() {
+  if (PHONE_DISPLAY.enabled) {
+    showWindow();
+    return;
+  }
+  process.env.PHONE_DISPLAY = 'on';
+  isQuitting = true;
+  const relaunchArgs = process.argv.slice(1);
+  if (!hasPhoneDisplayLaunchArgument(relaunchArgs)) relaunchArgs.push('--phone-display');
+  app.relaunch({ args: relaunchArgs });
+  app.quit();
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -636,7 +831,13 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', showWindow);
+  app.on('second-instance', (_event, commandLine) => {
+    if (hasPhoneDisplayLaunchArgument(commandLine)) {
+      relaunchWithPhoneDisplay();
+      return;
+    }
+    showWindow();
+  });
 
   app.whenReady().then(async () => {
     try {

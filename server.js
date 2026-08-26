@@ -4,7 +4,8 @@ const path = require('path');
 const { writeJsonAtomic } = require('./lib/atomic-json');
 const { createBridgeRefresher, refreshBridgeSnapshot } = require('./lib/bridge');
 const { createDashboardConfig, envNumber } = require('./lib/dashboard-config');
-const { LOCAL_HOSTS, createDashboardServer: createHttpServer, pageHtml, requestHostName } = require('./lib/http');
+const { LOCAL_HOSTS, createDashboardServer: createHttpServer, createPhoneDisplayServer: createPhoneHttpServer, pageHtml, requestHostName } = require('./lib/http');
+const { phoneDisplaySettings, phoneDisplayUrls } = require('./lib/phone-display');
 const { createClaudeCollector } = require('./lib/collectors/claude');
 const { createCodexCollector, normalizeCodexAppServerRateLimits, normalizeCodexRateLimits, parseCodexEventLine, queryCodexAppServerRateLimits, resolveCodexExecutable } = require('./lib/collectors/codex');
 const { antigravityLineTimestamp, createAntigravityCollector, isUsableAntigravityData, parseAntigravityQuotaPayload } = require('./lib/collectors/antigravity');
@@ -94,18 +95,63 @@ function createDashboardServer(options = {}) {
   });
 }
 
+function createPhoneDisplayServer(options = {}) {
+  return createPhoneHttpServer({
+    usageProvider: options.usageProvider || defaultUsageProvider,
+    access: options.access,
+    pairingAttempts: options.pairingAttempts,
+  });
+}
+
 function hostForUrl(host) {
   return host.includes(':') ? `[${host}]` : host;
 }
 
+function createPhoneUsageProvider(options = {}) {
+  const env = options.env || process.env;
+  const sourceHost = options.sourceHost || HOST;
+  const sourcePort = options.sourcePort || envNumber('PHONE_DISPLAY_SOURCE_PORT', PORT, {
+    integer: true,
+    min: 1,
+    max: 65535,
+  }, env);
+  const fetchImpl = options.fetchImpl || fetch;
+  const sourceUrl = `http://${hostForUrl(sourceHost)}:${sourcePort}/api/usage`;
+
+  return async () => {
+    const response = await fetchImpl(sourceUrl, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`desktop usage source returned HTTP ${response.status}`);
+    return response.json();
+  };
+}
+
 if (require.main === module) {
   const server = createDashboardServer();
+  const phoneDisplay = phoneDisplaySettings();
   server.listen(PORT, HOST, () => {
     const urlHost = hostForUrl(HOST);
     console.log('Claude / Codex usage dashboard');
     console.log(`Desktop: http://${urlHost}:${PORT}/?mode=desktop`);
     console.log(`API:     http://${urlHost}:${PORT}/api/usage`);
   });
+  if (phoneDisplay.enabled) {
+    const phoneServer = createPhoneDisplayServer({
+      access: phoneDisplay.access,
+      usageProvider: createPhoneUsageProvider(),
+    });
+    phoneServer.on('error', (error) => {
+      console.error('[phone-display-server] startup failed:', error.message);
+    });
+    phoneServer.listen(phoneDisplay.port, phoneDisplay.host, () => {
+      const urls = phoneDisplay.host === '127.0.0.1'
+        ? [`http://127.0.0.1:${phoneDisplay.port}/phone/`]
+        : phoneDisplayUrls(phoneDisplay.port);
+      console.log('Phone display: enabled (private IPv4 clients only)');
+      for (const url of urls) console.log(`Phone:   ${url}`);
+      if (!urls.length) console.log(`Phone:   http://<this-pc-lan-ip>:${phoneDisplay.port}/phone/`);
+      console.log(`Pairing: ${phoneDisplay.access.pairingCode}`);
+    });
+  }
 }
 
 module.exports = {
@@ -113,6 +159,8 @@ module.exports = {
   antigravityLineTimestamp,
   buildAgentCatalog: snapshotCollector.buildAgentCatalog,
   createDashboardServer,
+  createPhoneDisplayServer,
+  createPhoneUsageProvider,
   createGrokUsageBridgeRefresher,
   createKimiUsageBridgeRefresher,
   defaultUsageProvider,
